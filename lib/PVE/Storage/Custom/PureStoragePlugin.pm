@@ -14,6 +14,11 @@ use PVE::JSONSchema qw(get_standard_option);
 use PVE::Cluster qw(cfs_read_file);
 use PVE::ProcFSTools;
 
+use Fcntl qw(:flock);
+use JSON;
+use POSIX ();
+use File::Path qw(make_path);
+
 use PVE::Storage::Custom::PureStorage::API;
 use PVE::Storage::Custom::PureStorage::Naming qw(
     encode_volume_name
@@ -35,17 +40,23 @@ use PVE::Storage::Custom::PureStorage::ISCSI qw(
     logout_target
     get_sessions
     rescan_sessions
+    is_portal_logged_in
     wait_for_device
 );
 use PVE::Storage::Custom::PureStorage::Multipath qw(
     rescan_scsi_hosts
+    rescan_scsi_device
     multipath_reload
     multipath_flush
+    multipath_resize_map
     get_multipath_device
     get_device_by_wwid
     wait_for_multipath_device
     cleanup_lun_devices
     is_device_in_use
+    get_multipath_slaves
+    remove_scsi_device
+    list_pure_multipath_devices
 );
 use PVE::Storage::Custom::PureStorage::FC qw(
     get_fc_wwpns
@@ -171,6 +182,243 @@ sub options {
 # Get API client instance (cached per storage config)
 my %api_cache;
 use constant API_CACHE_TTL => 300;
+
+# Run `udevadm trigger --subsystem-match=block` and `udevadm settle` with
+# bounded timeouts. Bare `system('udevadm ...')` can hang indefinitely on a
+# wedged kernel namespace; PVE::Tools::run_command kills the child on timeout.
+sub _udev_refresh {
+    eval {
+        PVE::Tools::run_command(
+            ['/sbin/udevadm', 'trigger', '--subsystem-match=block'],
+            timeout => 10, errfunc => sub { }, outfunc => sub { },
+        );
+    };
+    eval {
+        PVE::Tools::run_command(
+            ['/sbin/udevadm', 'settle', '--timeout=5'],
+            timeout => 10, errfunc => sub { }, outfunc => sub { },
+        );
+    };
+}
+
+#
+# WWID tracking — cluster residual device cleanup
+#
+# The problem this solves: in a per-host mapping setup we connect every new
+# Pure volume to ALL cluster hosts (so live migration works). When node A
+# deletes a VM, node A cleans up its local multipath/SCSI devices and then
+# disconnects + deletes the volume on the array. But nodes B and C, which
+# also auto-discovered the volume via iSCSI rescan, are now left with stale
+# multipath devices pointing at a volume that no longer exists. Combined
+# with `queue_if_no_path` in multipath.conf, any process that touches one
+# of those stale devices later (e.g. `vgs` during a migration) enters
+# uninterruptible sleep (D state) and can only be recovered by a reboot.
+#
+# Each node keeps a tracking file at /var/lib/pve-storage-purestorage/<storeid>-wwids.json
+# that lists every WWID we've ever seen alive on this node. Periodically
+# (from status()) we query the array for the current alive WWIDs, auto-import
+# them into the tracking file (so all nodes converge on the same alive set),
+# then for any tracked WWID NOT in the alive set we clean its local stale
+# device. The plugin only ever touches WWIDs in its own tracking file or
+# auto-imported from the array — it never touches manually-managed devices
+# from other plugins or customer storage.
+
+sub _wwid_state_dir { return '/var/lib/pve-storage-purestorage'; }
+sub _wwid_lock_dir  { return '/var/run/pve-storage-purestorage'; }
+
+sub _safe_storeid {
+    my ($storeid) = @_;
+    $storeid //= 'unknown';
+    $storeid =~ s/[^A-Za-z0-9_-]/_/g;
+    return $storeid;
+}
+
+sub _wwid_state_file {
+    my ($storeid) = @_;
+    return _wwid_state_dir() . '/' . _safe_storeid($storeid) . '-wwids.json';
+}
+
+sub _wwid_lock_file {
+    my ($storeid) = @_;
+    return _wwid_lock_dir() . '/' . _safe_storeid($storeid) . '-wwids.lock';
+}
+
+sub _ensure_wwid_state_dir {
+    my $state_dir = _wwid_state_dir();
+    my $lock_dir  = _wwid_lock_dir();
+    eval { make_path($state_dir, { mode => 0700 }) unless -d $state_dir; };
+    eval { make_path($lock_dir,  { mode => 0700 }) unless -d $lock_dir;  };
+}
+
+# Acquire a non-blocking flock with bounded retries. Standard flock(LOCK_EX)
+# blocks indefinitely if another worker is stuck holding the lock; that would
+# defeat the whole point of all the timeout protections. After 10s of failing
+# to lock we proceed without the lock — better to risk a rare lost write than
+# to hang the whole storage daemon.
+sub _with_wwid_lock {
+    my ($storeid, $code) = @_;
+
+    _ensure_wwid_state_dir();
+    my $lock_file = _wwid_lock_file($storeid);
+
+    open(my $lock_fh, '>', $lock_file) or do {
+        warn "Cannot open WWID lock file $lock_file: $!\n";
+        return $code->();
+    };
+
+    my $deadline = time() + 10;
+    my $locked = 0;
+    while (time() < $deadline) {
+        if (flock($lock_fh, LOCK_EX | LOCK_NB)) {
+            $locked = 1;
+            last;
+        }
+        select(undef, undef, undef, 0.1);
+    }
+
+    unless ($locked) {
+        warn "Cannot acquire WWID lock $lock_file within 10s, proceeding without lock\n";
+        close($lock_fh);
+        return $code->();
+    }
+
+    my @ret = eval { $code->() };
+    my $err = $@;
+    flock($lock_fh, LOCK_UN);
+    close($lock_fh);
+    die $err if $err;
+    return wantarray ? @ret : $ret[0];
+}
+
+sub _read_wwid_state {
+    my ($storeid) = @_;
+    my $file = _wwid_state_file($storeid);
+    return {} unless -f $file;
+    open(my $fh, '<', $file) or return {};
+    local $/;
+    my $json = <$fh>;
+    close($fh);
+    my $data = eval { decode_json($json) } // {};
+    return ref($data) eq 'HASH' ? $data : {};
+}
+
+sub _write_wwid_state {
+    my ($storeid, $state) = @_;
+    _ensure_wwid_state_dir();
+    my $file = _wwid_state_file($storeid);
+    my $tmp = "$file.tmp.$$";
+    open(my $fh, '>', $tmp) or do {
+        warn "Cannot open $tmp for write: $!\n";
+        return 0;
+    };
+    print $fh encode_json($state // {});
+    close($fh);
+    rename($tmp, $file) or do {
+        warn "Cannot rename $tmp to $file: $!\n";
+        unlink($tmp);
+        return 0;
+    };
+    return 1;
+}
+
+sub _track_wwid {
+    my ($storeid, $wwid) = @_;
+    return unless $wwid;
+    _with_wwid_lock($storeid, sub {
+        my $state = _read_wwid_state($storeid);
+        return if $state->{lc($wwid)};
+        $state->{lc($wwid)} = time();
+        _write_wwid_state($storeid, $state);
+    });
+}
+
+sub _untrack_wwid {
+    my ($storeid, $wwid) = @_;
+    return unless $wwid;
+    _with_wwid_lock($storeid, sub {
+        my $state = _read_wwid_state($storeid);
+        if (delete $state->{lc($wwid)}) {
+            _write_wwid_state($storeid, $state);
+        }
+    });
+}
+
+# Cleanup orphaned/stale Pure multipath devices on this node.
+#
+# Phase 1: query the array for all current pve_* LUN WWIDs and auto-import
+#          them into the local tracking file. This is what makes nodes B/C
+#          aware of LUNs created on node A — without this, they would never
+#          find anything to clean up.
+# Phase 2: for every WWID in the tracking file that is NOT in the current
+#          array alive-set, if it has a local multipath device, clean it up.
+#          Then untrack it (whether or not the cleanup succeeded — repeated
+#          cleanup is idempotent).
+# Phase 3: best-effort warning for Pure multipath devices on this node that
+#          are not in tracking and not on the array. We do NOT auto-clean
+#          these because they could be from a manually-attached LUN, another
+#          plugin, or a customer's own storage.
+sub _cleanup_orphaned_devices {
+    my ($api, $storeid, $scfg) = @_;
+
+    my $san_storage = $storeid;
+    $san_storage =~ s/-/_/g;
+
+    my $pod = $scfg->{'pure-pod'};
+    my $pattern = "pve-${san_storage}-*";
+    $pattern = "${pod}::${pattern}" if $pod;
+
+    # Phase 1: import currently-alive WWIDs from the array.
+    my $volumes = eval { $api->volume_list($pattern); };
+    if ($@) {
+        warn "orphan cleanup: array query failed, aborting to avoid false positives: $@\n";
+        return;
+    }
+    $volumes //= [];
+
+    my %alive;
+    for my $vol (@$volumes) {
+        next unless $vol->{name};
+        next if $vol->{destroyed};  # already destroyed on the array
+        my $wwid = eval { $api->volume_get_wwid($vol->{name}); };
+        next unless $wwid;
+        $alive{lc($wwid)} = 1;
+        eval { _track_wwid($storeid, $wwid); };
+    }
+
+    # Phase 2: for each tracked WWID not on the array, clean its local stale
+    # device if any.
+    my $tracked = _read_wwid_state($storeid);
+    for my $wwid (keys %$tracked) {
+        next if $alive{$wwid};
+        my $mpath = eval { get_multipath_device($wwid); };
+        if ($mpath && -b $mpath) {
+            warn "orphan cleanup: stale Pure device $mpath (wwid $wwid) — array no longer has this volume, cleaning up\n";
+            # Refuse to clean if the stale device is somehow in use — better
+            # to leave it for the operator than to disrupt running I/O.
+            if (eval { is_device_in_use($mpath) }) {
+                warn "orphan cleanup: $mpath is in use, leaving for manual review\n";
+                next;
+            }
+            eval { cleanup_lun_devices($wwid); };
+            warn "orphan cleanup: cleanup of $wwid failed: $@\n" if $@;
+        }
+        eval { _untrack_wwid($storeid, $wwid); };
+    }
+
+    # Phase 3: warn about Pure multipath devices not tracked and not on array.
+    my $local = eval { list_pure_multipath_devices(); } // [];
+    for my $dev (@$local) {
+        my $w = $dev->{wwid};
+        next if $alive{$w};
+        next if $tracked->{$w};
+        warn "orphan cleanup: untracked stale Pure multipath device /dev/mapper/$dev->{name} " .
+             "(wwid $w) — not on array and not tracked. Possibly from a manually-attached LUN " .
+             "or a previous plugin version. Manual cleanup recommended:\n" .
+             "  multipathd disablequeueing map $dev->{name}\n" .
+             "  dmsetup message $dev->{name} 0 fail_if_no_path\n" .
+             "  multipath -f /dev/mapper/$dev->{name}\n";
+    }
+}
 
 sub _get_api {
     my ($scfg) = @_;
@@ -322,7 +570,11 @@ sub _backup_vm_config {
     eval { $api->volume_connect_host($config_vol, $host); };
     if ($@) {
         warn "Failed to connect config volume to host: $@\n";
-        eval { $api->volume_delete($config_vol); };
+        # Defensive disconnect: connection may have actually been made on
+        # the array even though the response was lost. Without this the
+        # subsequent volume_delete leaves orphaned host connections (Bug E).
+        _disconnect_from_all_hosts($api, $config_vol);
+        eval { $api->volume_delete($config_vol, skip_eradicate => 1); };
         return 0;
     }
 
@@ -330,8 +582,11 @@ sub _backup_vm_config {
     my $wwid = eval { $api->volume_get_wwid($config_vol); };
     unless ($wwid) {
         warn "Cannot get WWID for config volume\n";
-        eval { $api->volume_disconnect_host($config_vol, $host); };
-        eval { $api->volume_delete($config_vol); };
+        # Use _disconnect_from_all_hosts rather than a single
+        # volume_disconnect_host so we also catch any extra connections
+        # that may have appeared between connect and now.
+        _disconnect_from_all_hosts($api, $config_vol);
+        eval { $api->volume_delete($config_vol, skip_eradicate => 1); };
         return 0;
     }
 
@@ -361,20 +616,27 @@ sub _backup_vm_config {
         return 0;
     }
 
-    # Format with ext4 and write config
+    # Format with ext4 and write config. Wrap mkfs/mount/umount in
+    # PVE::Tools::run_command with explicit timeouts — bare system() can
+    # enter D state on a wedged multipath device. The 1MB volume was just
+    # allocated so the device should be healthy, but we still want a
+    # bounded failure mode rather than a node hang.
     my $mount_point = "/tmp/pve-pure-config-$$";
     my $mounted = 0;
     eval {
-        # Create filesystem (use list form to avoid shell injection)
-        # Use -O ^has_journal since 1MB is too small for journal
-        system('mkfs.ext4', '-q', '-F', '-O', '^has_journal', $device) == 0
-            or die "mkfs.ext4 failed: $?";
+        # Create filesystem. -O ^has_journal because 1MB is too small.
+        PVE::Tools::run_command(
+            ['/sbin/mkfs.ext4', '-q', '-F', '-O', '^has_journal', $device],
+            timeout => 30,
+        );
 
         # Mount and write config
         mkdir($mount_point) or die "mkdir failed: $!";
 
-        system('mount', $device, $mount_point) == 0
-            or die "mount failed: $?";
+        PVE::Tools::run_command(
+            ['/bin/mount', $device, $mount_point],
+            timeout => 30,
+        );
         $mounted = 1;
 
         # Write config file
@@ -392,9 +654,11 @@ sub _backup_vm_config {
         print $mfh "source_file=" . (_get_vm_config_path($vmid) // 'unknown') . "\n";
         close($mfh);
 
+        # Sync to ensure data hits the device before unmount
+        PVE::Tools::run_command(['/bin/sync'], timeout => 10);
+
         # Unmount
-        system('umount', $mount_point) == 0
-            or warn "umount failed: $?";
+        PVE::Tools::run_command(['/bin/umount', $mount_point], timeout => 30);
         $mounted = 0;
         rmdir($mount_point);
     };
@@ -402,7 +666,7 @@ sub _backup_vm_config {
         warn "Failed to write config to volume: $@\n";
         # Ensure mount is cleaned up even on error
         if ($mounted) {
-            system('umount', $mount_point);
+            eval { PVE::Tools::run_command(['/bin/umount', $mount_point], timeout => 30); };
             rmdir($mount_point);
         }
         # Cleanup local devices and Pure Storage volume
@@ -568,6 +832,35 @@ sub _ensure_host {
 
 # Connect volume to all cluster hosts for migration support
 # In per-node mode, volumes need to be connected to all nodes for live migration
+# Disconnect a volume from every Pure host that currently has a connection
+# to it. Used by cleanup paths after a partial _connect_to_all_hosts:
+# the connect helper may have succeeded on hosts 1..K and failed on K+1,
+# leaving the volume mapped to K hosts. Calling volume_delete in this state
+# is dangerous: even though Pure (unlike ONTAP) will physically destroy
+# the volume, the orphaned connection records cause iSCSI rescan on other
+# cluster nodes to discover ghost LUNs that become stale multipath
+# devices. With `no_path_retry queue` in defaults that is the same root
+# cause as the production hang incident.
+#
+# Best-effort: every disconnect is wrapped in eval and warns on failure
+# rather than dying — we never want a cleanup helper to itself fail and
+# mask the original error.
+sub _disconnect_from_all_hosts {
+    my ($api, $vol) = @_;
+    return unless $api && $vol;
+
+    my $connections = eval { $api->volume_get_connections($vol); };
+    return unless $connections && @$connections;
+
+    for my $conn (@$connections) {
+        next unless $conn->{name};
+        eval { $api->volume_disconnect_host($vol, $conn->{name}); };
+        if ($@) {
+            warn "_disconnect_from_all_hosts: failed to disconnect $vol from $conn->{name}: $@";
+        }
+    }
+}
+
 sub _connect_to_all_hosts {
     my ($scfg, $api, $pure_volname) = @_;
 
@@ -785,7 +1078,14 @@ sub _cleanup_orphaned_temp_clones {
 # Multipath configuration
 #
 
-# Pure Storage multipath device configuration
+# Pure Storage multipath device configuration.
+#
+# The no_path_retry value is critical: without it, the device inherits the
+# defaults section value, which on many sites is `queue` (NetApp's HA
+# recommendation). Combined with a stale Pure device that's been deleted on
+# the array, `queue` causes sync/blockdev/multipath -f to enter
+# uninterruptible sleep. Always set no_path_retry explicitly here so the
+# Pure device block overrides any dangerous default.
 my $PURE_MULTIPATH_DEVICE = q{
     device {
         vendor "PURE"
@@ -795,30 +1095,67 @@ my $PURE_MULTIPATH_DEVICE = q{
         prio alua
         hardware_handler "1 alua"
         failback immediate
-        fast_io_fail_tmo 10
+        no_path_retry 30
+        fast_io_fail_tmo 5
         dev_loss_tmo 60
     }
 };
 
-# Ensure multipath is configured for Pure Storage
-# This is safe to call multiple times - it only adds config if missing
+# Plugin-managed multipath config marker. Bumping this version number causes
+# _ensure_multipath_config to rewrite an existing file with the same marker
+# so old installs (1.0.x) get the no_path_retry safety setting on upgrade.
+use constant PURE_MULTIPATH_CONFIG_VERSION => '2';
+use constant PURE_MULTIPATH_CONFIG_MARKER  => '# pure-multipath-config-version: ';
+
+# Ensure multipath is configured for Pure Storage. Safe to call multiple
+# times — it only writes if missing or if an existing plugin-managed file
+# is older than the current version. Files NOT matching our marker are
+# never overwritten (we don't touch user-edited or third-party configs).
 sub _ensure_multipath_config {
     my $conf_file = '/etc/multipath.conf';
     my $conf_dir = '/etc/multipath/conf.d';
     my $pure_conf = "$conf_dir/pure-storage.conf";
 
+    my $build_content = sub {
+        my $c = "# Pure Storage FlashArray multipath configuration\n";
+        $c .= "# Auto-generated by jt-pve-storage-purestorage plugin\n";
+        $c .= PURE_MULTIPATH_CONFIG_MARKER . PURE_MULTIPATH_CONFIG_VERSION . "\n";
+        $c .= "# DO NOT EDIT — to override, delete this file and put your own\n";
+        $c .= "# config in /etc/multipath.conf or another file in conf.d/.\n\n";
+        $c .= "devices {$PURE_MULTIPATH_DEVICE}\n";
+        return $c;
+    };
+
     # Method 1: Use conf.d directory if it exists (preferred, non-invasive)
     if (-d $conf_dir) {
-        # Check if Pure Storage config already exists
+        # Check if a plugin-managed file already exists and whether it's
+        # the current version. If it's user-edited (no marker), leave it
+        # alone — that's a sign the operator deliberately customised it.
         if (-f $pure_conf) {
-            return 1;  # Already configured
+            my $existing = '';
+            if (open(my $fh, '<', $pure_conf)) {
+                local $/;
+                $existing = <$fh>;
+                close($fh);
+            }
+
+            # Not plugin-managed → leave alone.
+            unless ($existing =~ /\Q@{[ PURE_MULTIPATH_CONFIG_MARKER ]}\E(\d+)/) {
+                return 1;
+            }
+
+            my $existing_version = $1;
+            if ($existing_version eq PURE_MULTIPATH_CONFIG_VERSION) {
+                return 1;  # already current
+            }
+
+            warn "Pure multipath config at $pure_conf is plugin-managed " .
+                 "v$existing_version, upgrading to v" . PURE_MULTIPATH_CONFIG_VERSION .
+                 " (adds no_path_retry / fast_io_fail_tmo safety settings)\n";
+            # fall through to write
         }
 
-        # Create Pure Storage specific config
-        my $content = "# Pure Storage FlashArray multipath configuration\n";
-        $content .= "# Auto-generated by jt-pve-storage-purestorage plugin\n\n";
-        $content .= "devices {$PURE_MULTIPATH_DEVICE}\n";
-
+        my $content = $build_content->();
         eval {
             open(my $fh, '>', $pure_conf) or die "Cannot write $pure_conf: $!";
             print $fh $content;
@@ -829,9 +1166,9 @@ sub _ensure_multipath_config {
             return 0;
         }
 
-        # Reload multipathd
+        # Reload multipathd so the new device block takes effect.
         eval { multipath_reload(); };
-        warn "Created Pure Storage multipath configuration: $pure_conf\n";
+        warn "Wrote Pure Storage multipath configuration: $pure_conf\n";
         return 1;
     }
 
@@ -945,8 +1282,7 @@ sub activate_storage {
         multipath_reload();
 
         # Trigger udev to update device info
-        system('udevadm trigger --subsystem-match=block >/dev/null 2>&1');
-        system('udevadm settle --timeout=5 >/dev/null 2>&1');
+        _udev_refresh();
 
         # Verify FC fabric connectivity to Pure Storage target ports
         my $fc_targets = eval { get_fc_targets(); } // [];
@@ -970,6 +1306,15 @@ sub activate_storage {
                 my $target = $port->{iqn};
                 next unless $target;
 
+                # Fast path: if already logged in to this exact (portal,target)
+                # pair, skip discovery+login. Discovery alone can take 30s on
+                # an unresponsive portal and runs every time PVE re-activates
+                # the storage (status polling, linked clones, etc.).
+                my $portal_addr = "$ip:$port_num";
+                if (eval { is_portal_logged_in($portal_addr, $target) }) {
+                    next;
+                }
+
                 eval {
                     discover_targets($ip, port => $port_num);
                     login_target($ip, $target, port => $port_num);
@@ -984,8 +1329,7 @@ sub activate_storage {
             multipath_reload();
 
             # Trigger udev to update device info
-            system('udevadm trigger --subsystem-match=block >/dev/null 2>&1');
-            system('udevadm settle --timeout=5 >/dev/null 2>&1');
+            _udev_refresh();
         }
     }
 
@@ -1101,7 +1445,15 @@ sub deactivate_storage {
 sub status {
     my ($class, $storeid, $scfg, $cache) = @_;
 
-    my $api = _get_api($scfg);
+    # Fail-fast: if we cannot even build the API client (auth/host/etc) we
+    # MUST NOT block PVE status polling. Return inactive immediately so the
+    # web UI keeps responding instead of hanging on the API timeout.
+    my $api = eval { _get_api($scfg); };
+    if (!$api) {
+        warn "Failed to connect to Pure Storage: $@";
+        return (0, 0, 0, 0);
+    }
+
     my $pod = $scfg->{'pure-pod'};
 
     eval {
@@ -1115,6 +1467,24 @@ sub status {
         warn "Failed to get storage status: $@";
         return (0, 0, 0, 0);
     }
+
+    # Run periodic background cleanup using the double-fork pattern: the
+    # intermediate child forks the actual worker (grandchild) and exits
+    # immediately. The grandchild gets reparented to init and is reaped
+    # automatically — no zombie, and status() never blocks on cleanup work.
+    my $intermediate_pid = fork();
+    if (defined $intermediate_pid && $intermediate_pid == 0) {
+        my $grandchild_pid = fork();
+        if (defined $grandchild_pid && $grandchild_pid == 0) {
+            # Grandchild — do the actual cleanup work.
+            eval { _cleanup_orphaned_temp_clones($scfg, $storeid, $api); };
+            eval { _cleanup_orphaned_devices($api, $storeid, $scfg); };
+            POSIX::_exit(0);
+        }
+        # Intermediate exits immediately, leaving grandchild orphaned.
+        POSIX::_exit(0);
+    }
+    waitpid($intermediate_pid, 0) if defined $intermediate_pid;
 
     return ($cache->{total}, $cache->{avail}, $cache->{used}, 1);
 }
@@ -1187,15 +1557,32 @@ sub alloc_image {
         }
     }
 
-    # Create volume
-    eval {
-        $api->volume_create($pure_volname, $size_bytes);
-    };
-    if ($@) {
-        if ($@ =~ /quota/i || $@ =~ /capacity/i) {
-            die "Failed to create volume '$pure_volname': insufficient storage capacity or quota exceeded. $@";
+    # Create volume, with disk-id collision retry for regular VM disks.
+    # _find_free_diskid + volume_create has a TOCTOU window: two concurrent
+    # alloc_image() calls for the same VM can both pick the same disk ID and
+    # one will fail with "already exists". Catch that and bump the diskid.
+    my $is_regular_disk = $pve_volname && $pve_volname =~ /^vm-\d+-disk-(\d+)$/;
+    my $create_attempts = 0;
+    while (1) {
+        $create_attempts++;
+        eval { $api->volume_create($pure_volname, $size_bytes); };
+        last unless $@;
+
+        my $err = $@;
+        if ($is_regular_disk && $create_attempts < 5 &&
+            $err =~ /already exists|duplicate|conflict|409/i) {
+            warn "alloc_image: disk-id collision on '$pure_volname', retrying with next free id\n";
+            my $new_diskid = _find_free_diskid($scfg, $storeid, $vmid);
+            $pure_volname_base = encode_volume_name($storeid, $vmid, $new_diskid);
+            $pure_volname = _get_full_volname($scfg, $pure_volname_base);
+            $pve_volname = "vm-${vmid}-disk-${new_diskid}";
+            next;
         }
-        die "Failed to create volume '$pure_volname': $@";
+
+        if ($err =~ /quota/i || $err =~ /capacity/i) {
+            die "Failed to create volume '$pure_volname': insufficient storage capacity or quota exceeded. $err";
+        }
+        die "Failed to create volume '$pure_volname': $err";
     }
 
     # Connect volume to all cluster hosts for migration support
@@ -1204,9 +1591,13 @@ sub alloc_image {
         ($connected_hosts, $failed_hosts) = _connect_to_all_hosts($scfg, $api, $pure_volname);
     };
     if ($@) {
-        # Cleanup on failure - delete the just-created volume (soft delete for recoverability)
+        # Cleanup on failure. _connect_to_all_hosts may have partially
+        # succeeded — disconnect every host it managed to connect before
+        # destroying the volume, otherwise the orphaned host connections
+        # cause ghost LUNs on other cluster nodes (Bug E from to_pure3).
         my $conn_err = $@;
         warn "Volume host connection failed, cleaning up volume '$pure_volname'\n";
+        _disconnect_from_all_hosts($api, $pure_volname);
         eval { $api->volume_delete($pure_volname, skip_eradicate => 1); };
         die "Failed to connect volume to host: $conn_err";
     }
@@ -1230,6 +1621,9 @@ sub alloc_image {
         my $wwid = eval { $api->volume_get_wwid($pure_volname); };
         unless ($wwid) {
             warn "Cannot get WWID for state volume '$pure_volname', cleaning up\n";
+            # Disconnect first to avoid leaving orphaned host connections
+            # that turn into ghost LUNs on other cluster nodes (Bug E).
+            _disconnect_from_all_hosts($api, $pure_volname);
             eval { $api->volume_delete($pure_volname, skip_eradicate => 1); };
             die "Failed to get WWID for state volume '$pve_volname'.";
         }
@@ -1288,8 +1682,7 @@ sub alloc_image {
             eval { multipath_reload(); };
 
             # Trigger udev to update WWIDs (fixes stale WWID cache issue)
-            system('udevadm trigger --subsystem-match=block >/dev/null 2>&1');
-            system('udevadm settle --timeout=5 >/dev/null 2>&1');
+            _udev_refresh();
 
             # Check for device
             $device = get_multipath_device($wwid);
@@ -1321,6 +1714,9 @@ sub alloc_image {
                         ", Visible FC targets: " . scalar(@online_tgts);
             }
 
+            # Disconnect from all hosts before delete (Bug E — orphaned
+            # connections become ghost LUNs on other cluster nodes).
+            _disconnect_from_all_hosts($api, $pure_volname);
             eval { $api->volume_delete($pure_volname, skip_eradicate => 1); };
             my $debug_cmds = "  multipath -ll (check multipath devices)\n" .
                 "  ls -la /dev/disk/by-id/ | grep $wwid (check device symlinks)";
@@ -1357,29 +1753,36 @@ sub free_image {
         return undef;
     }
 
-    # Get volume WWID for cleanup
+    # Step 1: Get the WWID and verify the local device is not in use.
     my $wwid = eval { $api->volume_get_wwid($pure_volname); };
 
-    # Safety check: Verify device is not in use before deletion
     if ($wwid) {
         my $device = get_device_by_wwid($wwid);
-        if ($device && -b $device) {
-            if (is_device_in_use($device)) {
-                die "Cannot delete volume '$volname': device $device is still in use. " .
-                    "Ensure VM is stopped and disk is not mounted.";
-            }
+        if ($device && -b $device && is_device_in_use($device)) {
+            die "Cannot delete volume '$volname': device $device is still in use. " .
+                "Ensure VM is stopped and disk is not mounted.";
         }
     }
 
-    # IMPORTANT: Cleanup local devices BEFORE deleting on Pure Storage
+    # Step 2: Capture the multipath slave list BEFORE any unmap. After we
+    # disconnect the volume on the array, an iSCSI rescan can make the
+    # multipath device disappear and we lose the ability to enumerate the
+    # underlying SCSI devices. We need that list to remove residual /dev/sdX
+    # entries in step 5.
+    my @scsi_slaves;
+    my $local_mpath;
     if ($wwid) {
-        eval { cleanup_lun_devices($wwid); };
-        if ($@) {
-            warn "Warning: Failed to cleanup local devices for $volname: $@\n";
+        $local_mpath = eval { get_multipath_device($wwid); };
+        if ($local_mpath) {
+            my $slaves_ref = eval { get_multipath_slaves($local_mpath) };
+            @scsi_slaves = @{ $slaves_ref // [] };
         }
     }
 
-    # Disconnect from all hosts
+    # Step 3: Disconnect from ALL hosts FIRST, BEFORE local cleanup.
+    # If we cleaned local devices first and then disconnected, an in-flight
+    # iSCSI rescan (e.g. from another node activating storage) could
+    # re-import the LUN and recreate the multipath device behind us.
     my $connections = eval { $api->volume_get_connections($pure_volname); };
     if ($connections && @$connections) {
         for my $conn (@$connections) {
@@ -1390,12 +1793,48 @@ sub free_image {
         }
     }
 
-    # Destroy volume (move to destroyed volumes, do NOT eradicate)
-    # This allows recovery from Pure Storage UI if needed
-    # Pure Storage will auto-eradicate based on array's eradication delay setting (default 24h)
+    # Step 4: Cleanup local multipath device.
+    if ($wwid) {
+        eval { cleanup_lun_devices($wwid); };
+        if ($@) {
+            warn "Warning: Failed to cleanup local devices for $volname: $@\n";
+        }
+
+        # Step 5: Remove any residual SCSI slave devices using the captured
+        # list. cleanup_lun_devices already does this, but only after the
+        # multipath -f succeeds. If multipath -f fell back to dmsetup, the
+        # slave loop inside cleanup_lun_devices runs against an already-gone
+        # /sys/block/.../slaves directory, so the slaves can leak.
+        for my $slave (@scsi_slaves) {
+            if (-b $slave) {
+                eval { remove_scsi_device($slave); };
+            }
+        }
+
+        # Step 6: Final multipath reload to settle any leftover state.
+        eval { multipath_reload(); };
+    }
+
+    # Step 7: Destroy volume on Pure Storage (soft delete — Pure auto-eradicates
+    # after the array's configured delay, default 24h, allowing recovery via
+    # the Pure UI if this turns out to be wrong).
     eval { $api->volume_delete($pure_volname, skip_eradicate => 1); };
     if ($@) {
         die "Failed to destroy volume '$pure_volname': $@";
+    }
+
+    # Step 8: Conditional WWID untrack. If our local cleanup left a stale
+    # device behind (e.g. multipath -f and dmsetup both failed), KEEP the
+    # WWID tracked so the next status() orphan-cleanup pass can retry.
+    # Otherwise untrack so we don't keep churning over a dead entry.
+    if ($wwid) {
+        my $still_present = eval { get_multipath_device($wwid); };
+        if ($still_present) {
+            warn "free_image: local multipath device for WWID $wwid still exists after cleanup; " .
+                 "keeping WWID tracked so orphan cleanup can retry.\n";
+        } else {
+            eval { _untrack_wwid($storeid, $wwid); };
+        }
     }
 
     # Check if this was the last disk for the VM, if so cleanup config volumes
@@ -1471,10 +1910,19 @@ sub list_images {
             }
         }
     };
-    # Fallback to individual queries ONLY if batch query failed (not if just empty)
+    # Fallback to individual queries ONLY if batch query failed (not if just
+    # empty). Bound the per-volume loop with a wall-clock deadline so a slow
+    # array doesn't cascade timeouts across hundreds of volumes; any volume
+    # we don't get to is treated as non-template.
     if ($@ && !$batch_query_ok) {
         warn "Batch snapshot query failed, falling back to individual queries: $@\n";
+        my $deadline = time() + 10;
         for my $vol (@$volumes) {
+            if (time() > $deadline) {
+                warn "list_images: template detection deadline reached, " .
+                     "skipping remaining volumes (treated as non-template)\n";
+                last;
+            }
             next unless $vol->{name};
             my $snap_name = "$vol->{name}.pve-base";
             my $snap = eval { $api->snapshot_get($snap_name); };
@@ -1579,27 +2027,42 @@ sub volume_resize {
     # Resize volume (Pure Storage supports online resize)
     $api->volume_resize($pure_volname, $size);
 
-    # If VM is running, rescan the device to pick up new size
+    # Pick up the new size on the host. Note: there are TWO different SCSI
+    # rescan operations and they are NOT interchangeable:
+    #
+    #   - host scan (echo - - - > /sys/class/scsi_host/hostN/scan)
+    #     -> discovers NEW devices on a SCSI host. Use this after
+    #        alloc_image / activate_volume / clone_image.
+    #
+    #   - per-device rescan (echo 1 > /sys/block/sdX/device/rescan)
+    #     -> re-reads attributes (capacity!) of an EXISTING device. Use
+    #        this after volume_resize / volume_snapshot_rollback.
+    #
+    # The previous implementation used host scan after a resize, which
+    # never updated the existing device's capacity. The array showed the
+    # new size, the multipath device showed the old size, and QEMU's
+    # block_resize then failed with "Cannot grow device files".
+    #
+    # Also: after refreshing each underlying SCSI path, the multipath
+    # layer above still reports the old size until you tell multipathd
+    # explicitly. multipath_resize_map() does that.
     if ($running) {
         my $wwid = eval { $api->volume_get_wwid($pure_volname); };
         if ($wwid) {
             my $device = get_device_by_wwid($wwid);
             if ($device && -b $device) {
-                # Rescan the device to update size
-                eval {
-                    my $protocol = $scfg->{'pure-protocol'} // 'iscsi';
-                    if ($protocol eq 'fc') {
-                        rescan_fc_hosts(delay => 1);
-                    } else {
-                        rescan_sessions();
-                    }
-                    rescan_scsi_hosts();
-                    multipath_reload();
+                # 1. Per-slave SCSI rescan (re-reads capacity from each path)
+                my $slaves = eval { get_multipath_slaves($device) } // [];
+                for my $slave (@$slaves) {
+                    eval { rescan_scsi_device($slave); };
+                }
 
-                    # Trigger udev to update device info
-                    system('udevadm trigger --subsystem-match=block >/dev/null 2>&1');
-                    system('udevadm settle --timeout=5 >/dev/null 2>&1');
-                };
+                # 2. Tell multipathd to update the map size on top of the
+                #    refreshed paths.
+                eval { multipath_resize_map($device); };
+
+                # 3. udev refresh so /dev/disk/by-id/ size attributes update
+                _udev_refresh();
             }
         }
     }
@@ -1732,8 +2195,10 @@ sub deactivate_volume {
     if ($wwid) {
         my $device = get_device_by_wwid($wwid);
         if ($device && -b $device) {
-            system('sync');
-            system('blockdev', '--flushbufs', $device);
+            # Use timeout-bounded run_command — bare system('sync')/blockdev
+            # can enter D state on a wedged device.
+            eval { PVE::Tools::run_command(['/bin/sync'], timeout => 10); };
+            eval { PVE::Tools::run_command(['/sbin/blockdev', '--flushbufs', $device], timeout => 10); };
         }
     }
 
@@ -1794,8 +2259,19 @@ sub path {
             my $host = _get_host_name($scfg);
             eval { $api->volume_connect_host($temp_clone_name, $host); };
             if ($@) {
-                eval { $api->volume_delete($temp_clone_name); };
-                die "Failed to connect temporary clone to host: $@";
+                # Save the original error before any inner eval, otherwise
+                # the cleanup eval below clobbers $@ and we die with the
+                # wrong message.
+                my $connect_err = $@;
+                # Defensive disconnect: volume_connect_host may have
+                # actually made the connection on the array even though
+                # the response was lost (network glitch / API timeout).
+                # Without this, the cleanup volume_delete leaves an
+                # orphaned host connection — same Bug E pattern as
+                # alloc_image / clone_image.
+                _disconnect_from_all_hosts($api, $temp_clone_name);
+                eval { $api->volume_delete($temp_clone_name, skip_eradicate => 1); };
+                die "Failed to connect temporary clone to host: $connect_err";
             }
 
             $target_vol = $temp_clone_name;
@@ -1824,34 +2300,43 @@ sub path {
         multipath_reload();
 
         # Trigger udev to update WWIDs (fixes stale WWID cache issue)
-        system('udevadm trigger --subsystem-match=block >/dev/null 2>&1');
-        system('udevadm settle --timeout=5 >/dev/null 2>&1');
+        _udev_refresh();
     }
 
     # Try multipath first
     my $device = get_multipath_device($wwid);
     $device //= get_device_by_wwid($wwid);
 
-    # If device not found, try a quick rescan
+    # Retry loop for newly-attached LUNs. After alloc_image() creates a LUN
+    # the kernel may not have discovered it yet; one rescan is often not
+    # enough, especially with multiple iSCSI portals or FC fabrics.
     if (!$device || ! -b $device) {
+        my $max_wait = $scfg->{'pure-device-timeout'} // 30;
+        my $start = time();
         my $protocol = $scfg->{'pure-protocol'} // 'iscsi';
-        if ($protocol eq 'fc') {
-            rescan_fc_hosts(delay => 1);
-        } else {
-            rescan_sessions();
+
+        while ((time() - $start) < $max_wait) {
+            if ($protocol eq 'fc') {
+                eval { rescan_fc_hosts(delay => 1); };
+            } else {
+                eval { rescan_sessions(); };
+            }
+            eval { rescan_scsi_hosts(); };
+            eval { multipath_reload(); };
+
+            # Trigger udev to update WWIDs (fixes stale WWID cache issue)
+            _udev_refresh();
+
+            $device = get_multipath_device($wwid);
+            $device //= get_device_by_wwid($wwid);
+            last if $device && -b $device;
+
+            sleep(2);
         }
-        rescan_scsi_hosts();
-        multipath_reload();
-
-        # Trigger udev to update WWIDs (fixes stale WWID cache issue)
-        system('udevadm trigger --subsystem-match=block >/dev/null 2>&1');
-        system('udevadm settle --timeout=5 >/dev/null 2>&1');
-
-        $device = get_multipath_device($wwid);
-        $device //= get_device_by_wwid($wwid);
     }
 
-    # Wait for device if temp clone
+    # Wait for device if temp clone (separate logic because temp clones often
+    # need a longer wait — the array has to provision the clone first).
     if ($is_temp_clone && (!$device || ! -b $device)) {
         my $timeout = $scfg->{'pure-device-timeout'} // 60;
         my $protocol = $scfg->{'pure-protocol'} // 'iscsi';
@@ -1869,6 +2354,13 @@ sub path {
     if (!$device || ! -b $device) {
         die "Device for volume '$target_vol' (WWID: $wwid) not found locally. " .
             "Check SAN connectivity and run 'multipath -ll' to diagnose.";
+    }
+
+    # Track this WWID locally so cluster orphan cleanup can find stale
+    # devices later. Only track real volumes, not temp snapshot clones
+    # (those have their own short-lived lifecycle).
+    if (!$is_temp_clone) {
+        eval { _track_wwid($storeid, $wwid); };
     }
 
     return ($device, $parsed->{vmid}, 'raw');
@@ -1934,6 +2426,23 @@ sub volume_snapshot {
     my $existing = eval { $api->snapshot_get($full_snap_name); };
     if ($existing) {
         die "Snapshot '$snap' already exists for volume '$volname'";
+    }
+
+    # Best-effort flush of host-side dirty buffers BEFORE the storage-level
+    # snapshot. For running VMs, qemu's own freeze handles consistency at
+    # the filesystem layer; this flush only catches the case where the
+    # device has dirty page cache from non-qemu access (e.g. backup tool
+    # writing directly to a stopped-VM volume). Skip if device is in use
+    # so we don't block on a busy live migration.
+    my $wwid = eval { $api->volume_get_wwid($pure_volname); };
+    if ($wwid) {
+        my $device = get_device_by_wwid($wwid);
+        if ($device && -b $device && !is_device_in_use($device)) {
+            eval { PVE::Tools::run_command(['/bin/sync'], timeout => 10); };
+            warn "pre-snapshot sync failed/timed out: $@" if $@;
+            eval { PVE::Tools::run_command(['/sbin/blockdev', '--flushbufs', $device], timeout => 10); };
+            warn "pre-snapshot blockdev --flushbufs failed for $device: $@" if $@;
+        }
     }
 
     # Create snapshot
@@ -2035,19 +2544,35 @@ sub volume_snapshot_rollback {
         die "Failed to rollback volume '$volname' to snapshot '$snap': $@";
     }
 
-    # Rescan to pick up any content/size changes
-    my $protocol = $scfg->{'pure-protocol'} // 'iscsi';
-    if ($protocol eq 'fc') {
-        eval { rescan_fc_hosts(delay => 1); };
-    } else {
-        eval { rescan_sessions(); };
-    }
-    eval { rescan_scsi_hosts(); };
-    eval { multipath_reload(); };
+    # Same per-device rescan + multipath map resize as volume_resize: the
+    # snapshot may have a different capacity than the current volume, and
+    # the kernel won't pick that up from a host scan alone.
+    #
+    # Additionally, after a rollback the kernel buffer cache may still
+    # hold pages from the post-snapshot content. Without invalidation,
+    # subsequent reads can silently return stale data. blockdev
+    # --flushbufs invalidates the cache for the multipath device.
+    if ($wwid) {
+        my $device = get_device_by_wwid($wwid);
+        if ($device && -b $device) {
+            # 1. Per-slave SCSI rescan
+            my $slaves = eval { get_multipath_slaves($device) } // [];
+            for my $slave (@$slaves) {
+                eval { rescan_scsi_device($slave); };
+            }
 
-    # Trigger udev to update device info
-    system('udevadm trigger --subsystem-match=block >/dev/null 2>&1');
-    system('udevadm settle --timeout=5 >/dev/null 2>&1');
+            # 2. Refresh multipath map size
+            eval { multipath_resize_map($device); };
+
+            # 3. CRITICAL: invalidate kernel buffer cache so subsequent
+            #    reads see the snapshot content, not stale post-snapshot
+            #    pages.
+            eval { PVE::Tools::run_command(['/sbin/blockdev', '--flushbufs', $device], timeout => 10); };
+
+            # 4. udev refresh
+            _udev_refresh();
+        }
+    }
 
     return 1;
 }
@@ -2336,24 +2861,48 @@ sub clone_image {
     # Generate Pure volume name for clone (with pod prefix)
     my $clone_pure_vol = _get_full_volname($scfg, encode_volume_name($storeid, $vmid, $new_diskid));
 
-    # Check if target volume already exists
-    my $existing_clone = eval { $api->volume_get($clone_pure_vol); };
-    if ($existing_clone) {
-        die "Clone target volume '$clone_pure_vol' already exists on Pure Storage. " .
-            "This may indicate a naming conflict.";
-    }
+    # Disk-id collision retry: same TOCTOU window as alloc_image —
+    # _find_free_diskid + volume_clone is not atomic. Two concurrent clones
+    # for the same VM can both pick the same disk id and one will fail
+    # with "already exists". Catch that and retry with the next free id.
+    my $clone_attempts = 0;
+    while (1) {
+        $clone_attempts++;
 
-    # Create clone from source (snapshot)
-    eval {
-        $api->volume_clone($clone_pure_vol, $source);
-    };
-    if ($@) {
-        if ($@ =~ /quota/i || $@ =~ /capacity/i) {
-            die "Failed to create clone: insufficient storage capacity or quota exceeded. $@";
-        } elsif ($@ =~ /not found/i) {
-            die "Failed to create clone from $source_type: source not found. $@";
+        # Check if target volume already exists (atomic-ish check; the
+        # volume_clone below is the real arbiter).
+        my $existing_clone = eval { $api->volume_get($clone_pure_vol); };
+        if ($existing_clone) {
+            if ($clone_attempts < 5) {
+                warn "clone_image: target '$clone_pure_vol' already exists, retrying with next free id\n";
+                $new_diskid = _find_free_diskid($scfg, $storeid, $vmid);
+                $new_volname = "vm-${vmid}-disk-${new_diskid}";
+                $clone_pure_vol = _get_full_volname($scfg, encode_volume_name($storeid, $vmid, $new_diskid));
+                next;
+            }
+            die "Clone target volume '$clone_pure_vol' already exists on Pure Storage. " .
+                "This may indicate a naming conflict.";
         }
-        die "Failed to create clone from $source_type: $@";
+
+        # Create clone from source (snapshot or volume)
+        eval { $api->volume_clone($clone_pure_vol, $source); };
+        last unless $@;
+
+        my $err = $@;
+        if ($clone_attempts < 5 && $err =~ /already exists|duplicate|conflict|409/i) {
+            warn "clone_image: disk-id collision on '$clone_pure_vol', retrying with next free id\n";
+            $new_diskid = _find_free_diskid($scfg, $storeid, $vmid);
+            $new_volname = "vm-${vmid}-disk-${new_diskid}";
+            $clone_pure_vol = _get_full_volname($scfg, encode_volume_name($storeid, $vmid, $new_diskid));
+            next;
+        }
+
+        if ($err =~ /quota/i || $err =~ /capacity/i) {
+            die "Failed to create clone: insufficient storage capacity or quota exceeded. $err";
+        } elsif ($err =~ /not found/i) {
+            die "Failed to create clone from $source_type: source not found. $err";
+        }
+        die "Failed to create clone from $source_type: $err";
     }
 
     # Connect cloned volume to all cluster hosts for migration support
@@ -2362,9 +2911,15 @@ sub clone_image {
         ($connected_hosts, $failed_hosts) = _connect_to_all_hosts($scfg, $api, $clone_pure_vol);
     };
     if ($@) {
-        # Cleanup on failure - delete the partially created clone (soft delete for recoverability)
+        # Cleanup on failure. Same Bug E pattern as alloc_image:
+        # _connect_to_all_hosts may have partially succeeded — disconnect
+        # every host it managed to connect before destroying the volume,
+        # otherwise orphaned host connections become ghost LUNs on other
+        # cluster nodes (the same root cause as the production hang
+        # incident with `no_path_retry queue` defaults).
         my $conn_err = $@;
         warn "Clone host connection failed, cleaning up volume '$clone_pure_vol'\n";
+        _disconnect_from_all_hosts($api, $clone_pure_vol);
         eval { $api->volume_delete($clone_pure_vol, skip_eradicate => 1); };
         if ($@) {
             warn "Warning: Failed to cleanup clone volume after error: $@\n";

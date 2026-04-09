@@ -23,6 +23,7 @@ our @EXPORT_OK = qw(
     get_sessions
     rescan_sessions
     is_target_logged_in
+    is_portal_logged_in
     wait_for_device
 );
 
@@ -183,8 +184,12 @@ sub login_target {
     my $port = $opts{port} // 3260;
     my $portal_addr = "$portal:$port";
 
-    # Check if already logged in
-    if (is_target_logged_in($target)) {
+    # Check if already logged in to THIS specific portal.
+    # Pure Storage iSCSI LIFs share the same target IQN across multiple
+    # controller ports, so checking by target name alone would falsely skip
+    # subsequent portals after the first login succeeded — leaving us with
+    # only one multipath path instead of N. Always check (portal, target).
+    if (is_portal_logged_in($portal_addr, $target)) {
         return 1;
     }
 
@@ -201,6 +206,14 @@ sub login_target {
     # Enable automatic login on boot
     _run_cmd([ISCSIADM, '-m', 'node', '-T', $target, '-p', $portal_addr,
               '-o', 'update', '-n', 'node.startup', '-v', 'automatic'],
+             allow_nonzero => 1);
+
+    # Enable session auto-recovery after a transient outage (e.g. Pure
+    # controller failover, switch reload). Default is 120s in iscsid.conf
+    # but the per-node value may be lower if iscsid was reconfigured later.
+    # Set explicitly so behaviour is deterministic.
+    _run_cmd([ISCSIADM, '-m', 'node', '-T', $target, '-p', $portal_addr,
+              '-o', 'update', '-n', 'node.session.timeo.replacement_timeout', '-v', '120'],
              allow_nonzero => 1);
 
     # Login
@@ -269,13 +282,32 @@ sub get_sessions {
     return \@sessions;
 }
 
-# Check if a target is logged in
+# Check if any session is open to a target (anywhere). Used as a coarse check.
 sub is_target_logged_in {
     my ($target) = @_;
 
     my $sessions = get_sessions();
     for my $session (@$sessions) {
         return 1 if $session->{target} eq $target;
+    }
+
+    return 0;
+}
+
+# Check if a session is open to a SPECIFIC (portal, target) pair.
+# This is the correct check before logging in to a Pure Storage iSCSI portal,
+# because all Pure controller LIFs serving the same target share one IQN.
+sub is_portal_logged_in {
+    my ($portal_addr, $target) = @_;
+
+    my $sessions = get_sessions();
+    for my $session (@$sessions) {
+        next unless $session->{target} eq $target;
+        # iscsiadm -m session reports portal as "ip:port,tpgt"; strip the
+        # trailing portal-group tag for comparison.
+        my $sess_portal = $session->{portal};
+        $sess_portal =~ s/,\d+$//;
+        return 1 if $sess_portal eq $portal_addr;
     }
 
     return 0;

@@ -1,3 +1,315 @@
+jt-pve-storage-purestorage (1.1.4-1) stable; urgency=high
+
+  * Six more bugs found by an internal deep audit after 1.1.3, applying
+    the "sibling pattern" rule (every bug fix triggers a codebase-wide
+    search for the same anti-pattern) to every cleanup path, /sys/block
+    access, and API version-divergence point.
+
+  * [HIGH] volume_get_connections() did not normalise the API 1.x
+    response shape. Pure REST 1.x returns
+    `[{ host => "h1", lun => 1, name => "myvol" }, ...]` where the
+    `name` field is the VOLUME name, not the host name. The 2.x branch
+    was already normalised to `{ name => "<host>" }`. Every caller
+    (free_image, _disconnect_from_all_hosts, _backup_vm_config,
+    _cleanup_orphaned_temp_clones, _cleanup_temp_snap_clone,
+    alloc_image orphan-cleanup) iterated `$conn->{name}`, which on
+    1.x returned the VOLUME name. The subsequent
+    `volume_disconnect_host($vol, $conn->{name})` therefore passed the
+    volume name as the host argument, which silently fails inside an
+    eval. **Result on API 1.x: every disconnect call was a no-op,
+    leaving orphaned host connections forever, and every volume_delete
+    cleanup hit the Bug E ghost-LUN failure mode.** Fix: normalise the
+    API 1.x branch in volume_get_connections() to the same
+    `[{ name => "<host>" }]` shape, with fallback to `host_name` and
+    `name` fields.
+
+  * [HIGH] path() temp clone connect-failure had two bugs in one
+    sequence: (a) Bug E pattern — `volume_delete($temp)` called
+    without disconnect first, (b) `$@` clobber — the inner cleanup
+    eval reset `$@` so the subsequent `die "...$@"` showed the
+    cleanup error instead of the original connect error. Fixed both:
+    save `$connect_err = $@` first, then call
+    `_disconnect_from_all_hosts` before `volume_delete`, then die with
+    the saved error.
+
+  * [HIGH] _backup_vm_config() connect-failure had the same Bug E
+    pattern: volume_connect_host fails -> volume_delete without
+    disconnect -> orphaned host connection on the array. Fixed by
+    calling _disconnect_from_all_hosts before volume_delete in both
+    the connect-fail branch and the "Cannot get WWID" branch.
+
+  * [MEDIUM] clone_image() was missing disk-id collision retry —
+    same TOCTOU window as alloc_image had before 1.1.0. Two
+    concurrent `qm clone` invocations on the same source VM could
+    both pick the same disk id from _find_free_diskid and one would
+    fail with "already exists". Fixed with a 5-attempt retry loop
+    around the volume_clone call: on collision, refetch the next
+    free id and retry.
+
+  * [LOW] rescan_scsi_device() used basename() instead of
+    _resolve_block_device_name(). Current callers always pass /dev/sdX
+    so the bug is latent, but as an exported helper a future caller
+    passing /dev/mapper/<wwid> would silently fail. Fixed
+    defensively for consistency with the rest of the Multipath module
+    after the 1.1.2 Bug C/D fixes.
+
+  * [LOW] _backup_vm_config() used bare system() for mkfs.ext4 / mount
+    / umount. The 1MB volume is freshly allocated so the device is
+    healthy in normal operation, but a wedged multipath device would
+    cause mount to enter D state. Replaced all four with
+    PVE::Tools::run_command(..., timeout => 30) and added an explicit
+    sync before umount. The error-path umount also gets a 30s timeout.
+
+ -- Jason Cheng (Jason Tools) <jason@jason.tools>  Thu, 09 Apr 2026 20:00:00 +0800
+
+jt-pve-storage-purestorage (1.1.3-1) stable; urgency=high
+
+  * Three more bugs found by a proactive sibling-pattern audit after
+    the 1.1.2 release. All three follow the rule "when you fix a bug
+    pattern, the same pattern often exists elsewhere you haven't
+    checked." Pure plugin had every one of them.
+
+  * [HIGH] Bug E: alloc_image() and clone_image() cleanup-on-failure
+    paths previously called volume_delete() without first disconnecting
+    the volume from the cluster hosts that _connect_to_all_hosts() may
+    have already partially connected to. _connect_to_all_hosts iterates
+    every cluster host in per-node mode; if it succeeds on hosts 1..K
+    and fails on K+1, the volume is still mapped to K hosts when the
+    cleanup runs. Pure (unlike ONTAP) will physically destroy a still-
+    connected volume, but the orphaned host connection records cause
+    iSCSI rescan on other cluster nodes to discover ghost LUNs that
+    become stale multipath devices. Combined with `no_path_retry queue`
+    in /etc/multipath.conf defaults — same root cause as the production
+    hang incident that drove v1.1.0. Fixed by adding a
+    _disconnect_from_all_hosts() helper that queries the array for the
+    current connection list and disconnects each, and calling it BEFORE
+    volume_delete in every cleanup path. The same fix is applied to
+    four sites: alloc_image() main connect-fail cleanup, alloc_image()
+    state/cloudinit "Cannot get WWID" cleanup, alloc_image() state/
+    cloudinit "device did not appear" cleanup, and clone_image()
+    connect-fail cleanup.
+
+  * [LOW] Bug F: volume_snapshot() now flushes host-side dirty buffers
+    before calling snapshot_create on the array, mirroring what
+    volume_snapshot_rollback() already did before the rollback. For
+    running VMs the qemu freeze handles consistency at the filesystem
+    layer, but for offline volumes or external script callers (e.g.
+    backup tools writing directly to a stopped-VM volume) the dirty
+    page cache could be missing from the snapshot, producing a
+    filesystem-inconsistent capture. Guarded by is_device_in_use() so
+    we don't block on a busy live migration.
+
+  * [LOW] Bug G + dead export audit: removed four exported but
+    zero-caller functions from Multipath.pm — multipath_add,
+    multipath_remove, get_multipath_wwid, get_scsi_devices_by_serial.
+    get_multipath_wwid had a latent /dev/mapper symlink bug like the
+    one fixed in is_device_in_use in 1.1.2; rather than fix dead code
+    (and risk a future contributor seeing it in @EXPORT_OK and calling
+    it), the function is removed entirely. The other three were also
+    unused.
+
+ -- Jason Cheng (Jason Tools) <jason@jason.tools>  Thu, 09 Apr 2026 19:30:00 +0800
+
+jt-pve-storage-purestorage (1.1.2-1) stable; urgency=high
+
+  * CRITICAL: four bugs ported from jt-pve-storage-netapp v0.2.x post-release
+    forensics. The Pure plugin had the same broken patterns as the NetApp
+    plugin discovered after a real customer resize incident on 2026-04-09.
+    All four are CVE-class for production environments.
+
+  * [CRITICAL — DATA LOSS] is_device_in_use() previously called
+    basename($device) and looked at /sys/block/<basename>/holders. For a
+    multipath device path /dev/mapper/3624a9370... that resolved to
+    /sys/block/3624a9370.../holders, which DOES NOT EXIST — the holders
+    directory lives under /sys/block/dm-N/. The function therefore
+    returned 0 (not in use) for any multipath device, regardless of
+    whether an LVM volume group, dm-crypt container, or any other holder
+    sat on top of it. free_image() called this check before deleting,
+    saw "not in use", and proceeded to destroy the volume — taking the
+    customer's LVM data with it. Any production environment that uses
+    LVM (or dm-crypt / dm-raid / bcache / ...) on top of Pure-managed
+    volumes was at risk of silent data loss. Fixed by adding a
+    _resolve_block_device_name() helper that resolves /dev/mapper/<wwid>
+    symlinks to the underlying dm-N name before any /sys/block/ access.
+
+  * [HIGH] get_multipath_slaves() had the same broken pattern. It always
+    returned an empty list for /dev/mapper/<wwid> paths, which meant
+    free_image()'s post-cleanup SCSI slave removal silently skipped every
+    device, leaking SCSI residue across operations. Fixed via the same
+    _resolve_block_device_name() helper.
+
+  * [HIGH] volume_resize() called rescan_scsi_hosts() (host scan, used
+    to discover NEW devices) instead of per-device rescan (used to
+    re-read attributes of EXISTING devices). After a Pure-side resize the
+    array showed the new size, but the multipath device kept reporting
+    the old size, and QEMU's block_resize then failed with "Cannot grow
+    device files" on a running VM. Fixed to do per-slave
+    `echo 1 > /sys/block/sdX/device/rescan` followed by
+    `multipathd resize map <name>` (a new helper) to refresh the size of
+    the device-mapper layer above.
+
+  * [HIGH] volume_snapshot_rollback() had the same wrong rescan as Bug A,
+    plus a second issue: even after the underlying SCSI paths were
+    refreshed, the kernel buffer cache could still hold pages from the
+    post-snapshot content. Subsequent reads from the rolled-back volume
+    could return stale data. Fixed to (1) per-slave rescan, (2)
+    multipath_resize_map, AND (3) `blockdev --flushbufs <device>` to
+    invalidate the kernel buffer cache.
+
+  * Add multipath_resize_map() helper in Multipath.pm for the resize/
+    rollback fixes. Wrapped in @EXPORT_OK for use from the main plugin.
+
+  * Add _resolve_block_device_name() helper in Multipath.pm. Use it from
+    is_device_in_use() and get_multipath_slaves() — every other function
+    in the codebase that touches /sys/block/ should also be reviewed
+    against this pattern, and a checklist test added in TESTING.md.
+
+ -- Jason Cheng (Jason Tools) <jason@jason.tools>  Thu, 09 Apr 2026 19:00:00 +0800
+
+jt-pve-storage-purestorage (1.1.1-1) stable; urgency=high
+
+  * Multipath / anti-hang follow-ups discovered while reviewing v1.1.0
+    against the PVE storage plugin development guide:
+    - Pure multipath device block now sets `no_path_retry 30` and
+      `fast_io_fail_tmo 5` explicitly. Without these, the device inherited
+      the defaults section value, which on many sites is `queue` (the
+      NetApp HA recommendation). Combined with a stale device this caused
+      sync/blockdev/multipath -f to enter D state — exactly what we were
+      trying to prevent.
+    - _ensure_multipath_config now writes a version marker into the
+      generated /etc/multipath/conf.d/pure-storage.conf and rewrites
+      plugin-managed files when the version changes. Files without the
+      marker are still left untouched (operator-edited / third-party).
+      This means a 1.0.x → 1.1.x upgrade actually picks up the new
+      no_path_retry safety setting instead of silently keeping the old
+      file forever.
+    - Replace bare system('fuser', ...) in is_device_in_use with a
+      timeout-bounded _run_cmd. fuser opens the device path; on a wedged
+      multipath device with queue_if_no_path it can itself enter D state.
+    - Replace bare system('sync')/system('blockdev', ...) in volume_resize
+      with timeout-bounded PVE::Tools::run_command.
+    - Add _udev_refresh() helper that calls `udevadm trigger` and
+      `udevadm settle` via PVE::Tools::run_command with a 10s timeout,
+      and replace all bare system('udevadm ...') calls in the plugin and
+      the Multipath module.
+
+ -- Jason Cheng (Jason Tools) <jason@jason.tools>  Thu, 09 Apr 2026 18:30:00 +0800
+
+jt-pve-storage-purestorage (1.1.0-1) stable; urgency=high
+
+  * Major reliability release: port the v0.2.x lessons-learned fixes from
+    the related project jt-pve-storage-netapp which were validated
+    by a real production incident where stale multipath devices combined
+    with `queue_if_no_path` put PVE daemons into uninterruptible sleep
+    requiring a node reboot.
+
+  * Anti-hang protections (Section 1):
+    - Add sysfs_write_with_timeout / sysfs_read_with_timeout helpers in
+      Multipath.pm. All direct writes to /sys/class/scsi_host/*/scan,
+      /sys/class/block/*/device/{delete,rescan} and reads from
+      /proc/mounts and /sys/.../wwid now go through forked timeout-bounded
+      children so an unresponsive HBA cannot put the parent process into
+      D state.
+    - Replace bare system('sync') / system('blockdev') in cleanup paths
+      with timeout-bounded _run_cmd calls.
+    - cleanup_lun_devices now disables queue_if_no_path with multipathd
+      and issues `dmsetup message ... fail_if_no_path` BEFORE attempting
+      sync / blockdev / multipath -f. Otherwise queueing causes those
+      operations to hang forever on a dead device.
+    - multipath_flush now refuses to run without a device argument
+      (it used to fall through to `multipath -F` which flushes ALL maps
+      system-wide and can disconnect customer-managed non-Pure storage).
+    - multipath_flush has a built-in dmsetup --force fallback if
+      `multipath -f <wwid>` fails or times out.
+
+  * Cluster safety (Section 2):
+    - Add is_portal_logged_in() in ISCSI.pm and use it from login_target
+      and activate_storage. Pure controllers share one IQN across multiple
+      LIFs; checking by target only made the second-and-later portal
+      logins silently no-op, leaving the host with one path instead of N.
+    - login_target now sets node.session.timeo.replacement_timeout to 120
+      so transient outages and Pure controller failovers recover cleanly
+      regardless of iscsid.conf state.
+    - activate_storage skips iscsiadm discovery+login for already-connected
+      portals (saves up to 30s discovery latency on every status poll).
+
+  * free_image operation order (Section 3):
+    - Capture multipath slave device list BEFORE unmap (after unmap the
+      /sys/block/.../slaves directory disappears).
+    - Disconnect from ALL hosts FIRST, then clean local devices, then
+      delete the volume on the array. The previous order allowed an
+      in-flight iSCSI rescan from another node to re-import the LUN and
+      recreate the multipath device behind us.
+    - After cleanup_lun_devices, also remove residual SCSI slave devices
+      using the captured list and reload multipathd to settle state.
+
+  * API resilience (Section 4):
+    - Default UA timeout reduced from 30s to 15s and retry count from 3
+      to 2 (worst case ~34s instead of ~102s).
+    - _request now accepts a per-call timeout option that overrides the
+      UA timeout for that single call and is restored on every exit path.
+    - volume_delete uses a 60s per-call timeout because Pure volume
+      destroy can be slow when the volume has many snapshots.
+    - 401 retry now also re-applies any per-call timeout override after
+      _create_session may have rebuilt the LWP::UserAgent.
+    - status() now fail-fasts on API errors (returns inactive zeros)
+      instead of letting the polling thread block.
+    - status() now runs orphan/temp-clone cleanup in a double-forked
+      grandchild that gets reparented to init, so cleanup never blocks
+      the storage daemon.
+
+  * Cluster residual / orphan cleanup (Section 5):
+    - Add WWID tracking infrastructure: per-storage state file at
+      /var/lib/pve-storage-purestorage/<storeid>-wwids.json with
+      file-locking via /var/run/pve-storage-purestorage/<storeid>-wwids.lock.
+      Lock acquisition uses non-blocking flock with bounded retries
+      (10s deadline) to avoid blocking forever on a stuck worker.
+    - path() tracks the WWID after successfully resolving a real device.
+    - free_image conditionally untracks the WWID only after confirming
+      the local multipath device is gone — if cleanup left a stale
+      device, the WWID stays tracked so the next orphan cleanup pass
+      can retry.
+    - _cleanup_orphaned_devices runs in three phases: (1) auto-import
+      every current Pure-managed LUN WWID from the array (so all cluster
+      nodes converge on the same alive set), (2) for each tracked WWID
+      not on the array, clean its local stale device if any, (3) warn
+      about Pure multipath devices not in tracking and not on the array
+      (do NOT auto-clean — could be customer-managed).
+
+  * postinst (Section 6):
+    - Print a "CRITICAL Multipath Safety Rules" banner explaining
+      `multipath -F` vs `multipath -f`, restart vs reload, and the
+      recommended Pure-friendly multipath.conf settings.
+    - Detect dangerous /etc/multipath.conf settings (no_path_retry queue,
+      queue_if_no_path, dev_loss_tmo infinity) and warn without
+      auto-modifying the customer's config.
+    - Detect existing stale Pure multipath devices on upgrade and list
+      the exact manual cleanup commands.
+    - Pre-create /var/lib/pve-storage-purestorage and
+      /var/run/pve-storage-purestorage with mode 0700.
+
+  * Code quality (Section 7):
+    - alloc_image now retries on disk-id collision (TOCTOU between
+      _find_free_diskid and volume_create when two workers race).
+    - path() now has a proper retry loop bounded by pure-device-timeout
+      (default 30s) instead of a one-shot rescan.
+    - list_images template-detection fallback now has a 10s wall-clock
+      deadline so a slow array does not cascade timeouts across hundreds
+      of volumes.
+
+  * Documentation (Section 8):
+    - README.md and README_zh-TW.md gain prominent "CRITICAL: Multipath
+      Safety Rules" and "Upgrade SOP" sections near the top.
+    - New docs/TESTING.md and docs/TESTING_zh-TW.md: Pure-Storage-specific
+      test plan covering basic connectivity, VM lifecycle, hot-plug,
+      snapshot/clone, cluster orphan cleanup, mixed-environment safety,
+      failure injection (controller failover, blocked LIFs, blocked API,
+      queue_if_no_path + stale device hang), API 1.x and 2.x coverage,
+      naming edge cases, pod (ActiveCluster) mode, per-node vs shared
+      host mode, performance/sanity, and upgrade path.
+
+ -- Jason Cheng (Jason Tools) <jason@jason.tools>  Thu, 09 Apr 2026 18:00:00 +0800
+
 jt-pve-storage-purestorage (1.0.49-1) stable; urgency=medium
 
   * Second-round audit fixes for reliability and correctness:

@@ -13,6 +13,140 @@ This plugin enables Proxmox VE 9.1+ to use Pure Storage FlashArray for VM and Co
 >
 > **USE AT YOUR OWN RISK.** The author assumes no responsibility for any data loss, system downtime, or other damages that may result from using this plugin. Always test thoroughly in a non-production environment before deploying to production systems. Ensure you have proper backups before use.
 
+## CRITICAL: Multipath Safety Rules
+
+These rules apply to **any** SAN storage on Linux, but missing them with
+Pure Storage and a typical PVE multipath configuration has been observed
+to put PVE daemons into uninterruptible sleep (D state) — only recoverable
+by rebooting the node. Read these before installing the plugin.
+
+1. **NEVER run `multipath -F`** (capital F). It flushes ALL unused
+   multipath maps on the host, including any non-Pure storage that happens
+   to be idle at that moment. Always use the lowercase
+   `multipath -f /dev/mapper/<wwid>` form to flush a specific device.
+
+2. **Use `systemctl restart multipathd`, NOT `systemctl reload`.** Reload
+   only re-reads the config file. Restart actually re-applies device-mapper
+   state. The plugin uses restart in its own helpers for the same reason.
+
+3. **AVOID dangerous defaults.** The combination
+   `no_path_retry queue` + a stale device that the plugin is trying to
+   clean up will hang `multipath -f`, `sync`, `blockdev --flushbufs`, and
+   any process that opens the device. Recommended Pure-friendly settings:
+
+   ```
+   defaults {
+       polling_interval        10
+       no_path_retry           30
+       fast_io_fail_tmo        5
+       dev_loss_tmo            60
+   }
+   devices {
+       device {
+           vendor               "PURE"
+           product              "FlashArray"
+           path_selector        "queue-length 0"
+           path_grouping_policy group_by_prio
+           prio                 alua
+           hardware_handler     "1 alua"
+           failback             immediate
+           no_path_retry        30
+       }
+   }
+   ```
+
+4. **The plugin (v1.1.0+) handles cluster-wide cleanup automatically.**
+   Each node maintains a WWID tracking file
+   (`/var/lib/pve-storage-purestorage/<storeid>-wwids.json`) and
+   `pvesm status` runs an orphan-cleanup pass in a backgrounded grandchild
+   so the periodic cleanup never blocks the storage daemon. See
+   `docs/TESTING.md` Section 6 for the design rationale.
+
+## Upgrade SOP
+
+> **⚠️ READ FIRST — `/etc/multipath/conf.d/pure-storage.conf` upgrade behaviour**
+>
+> Starting in 1.1.1 the plugin writes a version marker
+> (`# pure-multipath-config-version: N`) into the `pure-storage.conf` it
+> generates, and `_ensure_multipath_config` rewrites that file when the
+> marker version changes. **Files WITHOUT the marker are left untouched
+> on purpose** — the plugin assumes they were created by an older plugin
+> version that the operator subsequently customised, or by a third party.
+>
+> **What this means for upgrades from 1.0.x → 1.1.2:**
+>
+> | Your existing file | What 1.1.2 does | Your action |
+> |---|---|---|
+> | No `pure-storage.conf` exists | Plugin writes the new file with `no_path_retry 30` / `fast_io_fail_tmo 5` | Nothing — done |
+> | `pure-storage.conf` exists, has the new marker (1.1.1+) | Plugin auto-upgrades to v2 on next `activate_storage` | Nothing — done |
+> | `pure-storage.conf` exists, **NO** marker (1.0.x or hand-edited) | Plugin **leaves the file alone** | **You must manually align it** with the new device block — see below |
+>
+> **If your file falls into the last row, you MUST manually update it** —
+> otherwise the new safety settings (`no_path_retry 30`,
+> `fast_io_fail_tmo 5`) will not be in effect, and a stale device on a
+> host with `no_path_retry queue` in `defaults` can still hang PVE.
+>
+> The recommended replacement device block:
+>
+> ```
+> devices {
+>     device {
+>         vendor               "PURE"
+>         product              "FlashArray"
+>         path_selector        "queue-length 0"
+>         path_grouping_policy group_by_prio
+>         prio                 alua
+>         hardware_handler     "1 alua"
+>         failback             immediate
+>         no_path_retry        30
+>         fast_io_fail_tmo     5
+>         dev_loss_tmo         60
+>     }
+> }
+> ```
+>
+> After editing, run `systemctl restart multipathd` (NOT `reload`).
+>
+> **The simplest way to opt back in to plugin management** is:
+> `rm /etc/multipath/conf.d/pure-storage.conf`. The next
+> `pvesm status pure1` will recreate it with the correct settings and
+> the marker, and from then on future upgrades will be automatic.
+
+Follow this procedure when upgrading from any earlier version (1.0.x) to
+1.1.0 or later. Do this **one node at a time**.
+
+1. **Backup `/etc/multipath.conf`** AND `/etc/multipath/conf.d/pure-storage.conf`
+   on every node.
+2. **Stop or migrate** running VMs off the node being upgraded if
+   possible (recommended; not strictly required).
+3. **Install the new package**:
+   ```
+   dpkg -i jt-pve-storage-purestorage_1.1.4-1_all.deb
+   ```
+4. **Read the postinst output carefully**. It will warn about:
+   - dangerous multipath.conf settings (Section above)
+   - any pre-existing stale Pure devices on the node
+   - the difference between `restart` and `reload` for multipathd
+5. **If postinst warned about multipath.conf**, edit the file as
+   instructed and then `systemctl restart multipathd`.
+6. **If postinst warned about stale Pure devices**, follow the manual
+   cleanup commands shown in the warning. Do NOT use `multipath -F`.
+6a. **Check `pure-storage.conf` upgrade status**:
+    ```
+    head -3 /etc/multipath/conf.d/pure-storage.conf
+    ```
+    If the file exists but does NOT contain a line starting with
+    `# pure-multipath-config-version:`, see the warning box above —
+    you must either manually align the device block with the new
+    template OR `rm` the file to let the plugin recreate it.
+7. **Verify**:
+   ```
+   pvesm status pure1                                # < 5s, active
+   cat /var/lib/pve-storage-purestorage/*-wwids.json # auto-imported
+   multipath -ll | grep -c PURE                      # path count looks right
+   ```
+8. **Move to the next node** only after the current node passes step 7.
+
 ## Features
 
 ### Storage Operations
@@ -63,7 +197,7 @@ This plugin enables Proxmox VE 9.1+ to use Pure Storage FlashArray for VM and Co
 ### From .deb package (Recommended)
 
 ```bash
-dpkg -i jt-pve-storage-purestorage_1.0.49-1_all.deb
+dpkg -i jt-pve-storage-purestorage_1.1.4-1_all.deb
 apt-get install -f  # Install dependencies if needed
 ```
 

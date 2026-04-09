@@ -1,5 +1,7 @@
 # Configuration Guide
 
+語言 / Language: [English](CONFIGURATION.md) | [繁體中文](CONFIGURATION_zh-TW.md)
+
 ## Storage Configuration Options
 
 ### Required Options
@@ -24,6 +26,20 @@
 | `pure-host-mode` | per-node | Host mode: `per-node` or `shared` |
 | `pure-cluster-name` | pve | Cluster name for host naming |
 | `pure-device-timeout` | 60 | Timeout in seconds for device discovery |
+| `pure-pod` | (none) | ActiveCluster pod name. When set, all volumes are created with `<pod>::` prefix |
+
+### Host modes
+
+- **per-node** (default, recommended for security): one Pure host object
+  per PVE node, named `pve-<cluster-name>-<nodename>`. Each volume is
+  connected to every node's host so live migration works.
+- **shared**: one Pure host object containing all nodes' WWPNs/IQNs,
+  named `pve-<cluster-name>-shared`. Simpler mapping but less isolation.
+
+In per-node mode, when `_connect_to_all_hosts` enumerates the cluster
+hosts, it queries the array for `pve-<cluster-name>-*` host objects. If
+your cluster name has special characters, sanitise them out (the plugin
+sanitises automatically, but it's good to verify with `pvesm status`).
 
 ## Example Configurations
 
@@ -71,6 +87,20 @@ purestorage: pure-secure
     shared 1
 ```
 
+### ActiveCluster Pod
+
+```ini
+purestorage: pure-pod1
+    pure-portal 192.168.1.100
+    pure-api-token xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+    pure-pod testpod
+    content images
+    shared 1
+```
+
+All volumes for this storage will be created as `testpod::pve-...`. The
+plugin transparently strips the prefix when listing volumes through PVE.
+
 ## Pure Storage API User Setup
 
 ### Creating API User
@@ -92,34 +122,61 @@ purestorage: pure-secure
 Minimum permissions for the API user:
 - Volumes: Create, Delete, Read, Update
 - Hosts: Create, Delete, Read, Update
-- Protection Groups: Read (for snapshots)
+- Connections: Create, Delete, Read
+- Snapshots: Create, Delete, Read
 
 ## Multipath Configuration
 
-The plugin works with default multipath settings. For optimal performance, you may want to customize `/etc/multipath.conf`:
+The plugin auto-creates `/etc/multipath/conf.d/pure-storage.conf` on the
+first `activate_storage` call. The auto-generated file is marked with a
+version line (`# pure-multipath-config-version: 2`); subsequent plugin
+upgrades will rewrite it when the marker version changes. **Files without
+the marker line are left untouched** so customer-edited configs are not
+overwritten.
 
-```ini
+If you prefer to manage multipath.conf yourself, place the following
+device block in `/etc/multipath/conf.d/` or in `/etc/multipath.conf`:
+
+```
 devices {
     device {
-        vendor "PURE"
-        product "FlashArray"
+        vendor               "PURE"
+        product              "FlashArray"
+        path_selector        "queue-length 0"
         path_grouping_policy group_by_prio
-        path_selector "queue-length 0"
-        path_checker tur
-        features "0"
-        hardware_handler "1 alua"
-        prio alua
-        failback immediate
-        fast_io_fail_tmo 10
-        dev_loss_tmo 60
+        prio                 alua
+        hardware_handler     "1 alua"
+        failback             immediate
+        no_path_retry        30
+        fast_io_fail_tmo     5
+        dev_loss_tmo         60
     }
 }
 ```
 
-After modifying, reload multipath:
+After modifying, **restart** multipathd (NOT `reload`):
+
 ```bash
-multipathd reconfigure
+systemctl restart multipathd
 ```
+
+`reload` only re-reads the config file. `restart` actually re-applies
+device-mapper state, which is what you want when changing per-device
+parameters.
+
+### Why these specific settings?
+
+| Setting | Bad value | Good value | Why |
+|---------|-----------|------------|-----|
+| `no_path_retry` | `queue` | `30` | `queue` = infinite queue → I/O hangs forever on stale devices, taking PVE daemons into D state |
+| `dev_loss_tmo` | `infinity` | `60` | `infinity` = stale SCSI devices never removed |
+| `fast_io_fail_tmo` | not set | `5` | Speeds up path failure detection |
+| `failback` | `manual` | `immediate` | Pure controllers are active/active; auto-rebalance |
+| `path_selector` | `round-robin` | `queue-length 0` | Better with Pure's parallel architecture |
+
+The plugin's auto-generated file always sets these explicitly so it
+overrides any dangerous default in the `defaults` section of
+`/etc/multipath.conf`.
 
 ## iSCSI Configuration
 
@@ -129,11 +186,18 @@ multipathd reconfigure
 cat /etc/iscsi/initiatorname.iscsi
 ```
 
-### Manual iSCSI Discovery (for troubleshooting)
+The plugin sets `node.session.timeo.replacement_timeout` to 120 on every
+login (overriding `iscsid.conf` if necessary) so Pure controller failover
+recovers cleanly.
+
+### Manual iSCSI Discovery (for troubleshooting only)
+
+The plugin handles discovery and login automatically. Manual operations
+should only be needed when debugging:
 
 ```bash
 iscsiadm -m discovery -t sendtargets -p <PURE_IP>
-iscsiadm -m node -L all
+iscsiadm -m session
 ```
 
 ## Fibre Channel Configuration
@@ -142,11 +206,34 @@ iscsiadm -m node -L all
 
 ```bash
 cat /sys/class/fc_host/host*/port_name
+cat /sys/class/fc_host/host*/port_state
 ```
 
-### Rescan FC
+All ports should be `Online`.
+
+### Verify FC zoning to Pure
 
 ```bash
-for host in /sys/class/fc_host/host*/issue_lip; do echo 1 > $host; done
-for host in /sys/class/scsi_host/host*/scan; do echo "- - -" > $host; done
+cat /sys/class/fc_remote_ports/rport-*/port_state
 ```
+
+You should see `Online` entries for the Pure target ports. If not,
+check FC switch zoning between this host and the Pure array.
+
+The plugin's `activate_storage` performs FC rescan automatically; manual
+LIP/scan is rarely needed.
+
+## State and Lock Directories
+
+The plugin creates and uses two directories (mode 0700, root-owned):
+
+| Path | Purpose |
+|------|---------|
+| `/var/lib/pve-storage-purestorage/` | Persistent WWID tracking JSON files (one per storage) |
+| `/var/run/pve-storage-purestorage/` | Lock files (tmpfs, cleared on reboot) |
+
+The state file `<storeid>-wwids.json` is what the cluster orphan-cleanup
+mechanism uses to find stale multipath devices on nodes that didn't
+perform a delete. **Do not edit it manually.** If you need to reset it,
+stop the storage and delete the file; the next `activate_storage` will
+auto-import the current array WWIDs.

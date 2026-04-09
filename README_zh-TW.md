@@ -13,11 +13,138 @@
 >
 > **使用風險自負。** 作者不對因使用本 Plugin 而造成的任何資料遺失、系統停機或其他損害承擔責任。請務必在測試環境中充分測試後，再部署到正式環境。使用前請確保已有適當的備份。
 
+## 重要：Multipath 安全規則
+
+以下規則對 Linux 上**任何** SAN 儲存皆適用，但若在使用 Pure Storage 配上
+典型 PVE multipath 設定時忽略,曾經實際造成 PVE daemon 進入不可中斷
+睡眠 (D state) — 只能透過重新啟動節點復原。安裝外掛前請務必先讀。
+
+1. **絕對不要執行 `multipath -F`** (大寫 F)。它會 flush 主機上**所有**
+   未使用的 multipath map,包含當下剛好閒置的非 Pure 儲存。請一律使用
+   小寫 `multipath -f /dev/mapper/<wwid>` 來 flush 特定裝置。
+
+2. **使用 `systemctl restart multipathd`,而非 `systemctl reload`。**
+   Reload 只重新讀取設定檔。Restart 才會真正重新套用 device-mapper 狀態。
+   外掛內部 helper 也是用 restart,理由相同。
+
+3. **避免危險的預設值。** `no_path_retry queue` 加上外掛正在嘗試清理
+   的殘留裝置會掛住 `multipath -f`、`sync`、`blockdev --flushbufs`,
+   以及任何開啟該裝置的 process。建議的 Pure-friendly 設定:
+
+   ```
+   defaults {
+       polling_interval        10
+       no_path_retry           30
+       fast_io_fail_tmo        5
+       dev_loss_tmo            60
+   }
+   devices {
+       device {
+           vendor               "PURE"
+           product              "FlashArray"
+           path_selector        "queue-length 0"
+           path_grouping_policy group_by_prio
+           prio                 alua
+           hardware_handler     "1 alua"
+           failback             immediate
+           no_path_retry        30
+       }
+   }
+   ```
+
+4. **外掛 (v1.1.0+) 自動處理叢集範圍的清理。**
+   每個節點維護一個 WWID 追蹤檔
+   (`/var/lib/pve-storage-purestorage/<storeid>-wwids.json`),
+   `pvesm status` 會在 backgrounded grandchild 中跑 orphan 清理,
+   定期清理永遠不會阻擋 storage daemon。設計理念請參考
+   `docs/TESTING_zh-TW.md` Section 6。
+
+## 升級 SOP
+
+> **⚠️ 升級前務必先讀 — `/etc/multipath/conf.d/pure-storage.conf` 升級行為**
+>
+> 自 1.1.1 起,外掛在自己產生的 `pure-storage.conf` 內寫入版本標記
+> (`# pure-multipath-config-version: N`),`_ensure_multipath_config`
+> 在標記版本變動時會重寫該檔案。**沒有標記的檔案會被刻意保留不動** —
+> 因為外掛會假設這類檔案是由更早版本建立後被操作員修改過,或是由
+> 第三方產生。
+>
+> **這對 1.0.x → 1.1.2 升級代表什麼:**
+>
+> | 你目前的檔案狀態 | 1.1.2 的行為 | 你必須做的事 |
+> |---|---|---|
+> | 沒有 `pure-storage.conf` | 外掛寫入新檔,含 `no_path_retry 30` / `fast_io_fail_tmo 5` | 不用做任何事 |
+> | `pure-storage.conf` 存在,有新版標記 (1.1.1+) | 下次 `activate_storage` 會自動升級到 v2 | 不用做任何事 |
+> | `pure-storage.conf` 存在,**沒有**標記 (1.0.x 或手改過) | 外掛**完全不動該檔** | **必須手動對齊**新版的 device 區塊 — 見下方 |
+>
+> **若你的檔案落在最後一列,你必須手動更新它** — 否則新的安全設定
+> (`no_path_retry 30`、`fast_io_fail_tmo 5`) 不會生效,在 `defaults`
+> 區塊有 `no_path_retry queue` 的主機上,殘留裝置仍然會掛住 PVE。
+>
+> 建議的替換 device 區塊:
+>
+> ```
+> devices {
+>     device {
+>         vendor               "PURE"
+>         product              "FlashArray"
+>         path_selector        "queue-length 0"
+>         path_grouping_policy group_by_prio
+>         prio                 alua
+>         hardware_handler     "1 alua"
+>         failback             immediate
+>         no_path_retry        30
+>         fast_io_fail_tmo     5
+>         dev_loss_tmo         60
+>     }
+> }
+> ```
+>
+> 編輯後執行 `systemctl restart multipathd` (**不要**用 `reload`)。
+>
+> **要回到讓外掛自動管理最簡單的方式**:
+> `rm /etc/multipath/conf.d/pure-storage.conf`。下次
+> `pvesm status pure1` 會用正確設定重建檔案並寫入標記,從此之後的
+> 升級就會全自動。
+
+從任何更早版本 (1.0.x) 升級到 1.1.0 以上時請依下列步驟執行。
+**一次只升一個節點**。
+
+1. **備份每個節點的 `/etc/multipath.conf`** 與
+   `/etc/multipath/conf.d/pure-storage.conf`。
+2. **停機或遷移**執行中的 VM 離開要升級的節點 (建議;非強制)。
+3. **安裝新套件**:
+   ```
+   dpkg -i jt-pve-storage-purestorage_1.1.4-1_all.deb
+   ```
+4. **仔細閱讀 postinst 輸出**。它會警告:
+   - 危險的 multipath.conf 設定 (上一節)
+   - 節點上既有的殘留 Pure 裝置
+   - multipathd 用 `restart` 與 `reload` 的差別
+5. **若 postinst 對 multipath.conf 警告**,請依指示編輯檔案,然後
+   `systemctl restart multipathd`。
+6. **若 postinst 對殘留 Pure 裝置警告**,請依警告中的手動清理指令處理。
+   **不要**用 `multipath -F`。
+6a. **檢查 `pure-storage.conf` 升級狀態**:
+    ```
+    head -3 /etc/multipath/conf.d/pure-storage.conf
+    ```
+    若該檔案存在但**沒有** `# pure-multipath-config-version:` 開頭的
+    那一行,請參考上方警告框 — 你必須手動對齊新版 device 區塊範本,
+    或是 `rm` 掉該檔讓外掛重新建立。
+7. **驗證**:
+   ```
+   pvesm status pure1                                # < 5s, active
+   cat /var/lib/pve-storage-purestorage/*-wwids.json # 已自動匯入
+   multipath -ll | grep -c PURE                      # 路徑數正確
+   ```
+8. **下個節點**,僅在當前節點通過第 7 步後再進行。
+
 ## 功能特色
 
 ### 儲存操作
 - 直接 Volume 建置（無需傳統 SAN 的 LUN 間接層）
-- 線上磁碟擴充（不需重啟 VM）
+- 線上磁碟擴充（不需重新啟動 VM）
 - 自動設定 Pure Storage 裝置的 Multipath
 
 ### Snapshot 與 Clone
@@ -63,7 +190,7 @@
 ### 從 .deb 套件安裝（建議）
 
 ```bash
-dpkg -i jt-pve-storage-purestorage_1.0.49-1_all.deb
+dpkg -i jt-pve-storage-purestorage_1.1.4-1_all.deb
 apt-get install -f  # 如需安裝相依套件
 ```
 
@@ -150,7 +277,7 @@ pvesm alloc pure1 100 vm-100-disk-0 10G
 # 列出磁碟
 pvesm list pure1
 
-# 查看磁碟大小
+# 檢視磁碟大小
 pvesm volume-size pure1:vm-100-disk-0
 
 # 擴充磁碟（支援線上擴充）

@@ -17,8 +17,11 @@ use Carp qw(croak);
 
 # Constants
 use constant {
-    DEFAULT_TIMEOUT     => 30,
-    DEFAULT_RETRY_COUNT => 3,
+    # 15s timeout × 2 retries gives ~34s worst case per API call. The previous
+    # 30s × 3 produced ~102s worst case which was long enough to wedge PVE
+    # status polling when the array was unreachable.
+    DEFAULT_TIMEOUT     => 15,
+    DEFAULT_RETRY_COUNT => 2,
     DEFAULT_RETRY_DELAY => 2,
     API_VERSION_1X      => '1.19',  # Pure Storage REST API 1.x (legacy)
     API_VERSION_2X      => '2.26',  # Pure Storage REST API 2.x (modern)
@@ -256,13 +259,29 @@ sub _get_api_token_v1 {
     return undef;
 }
 
-# Execute API request with retry logic
+# Execute API request with retry logic.
+#
+# Options:
+#   timeout => N   Per-call UA timeout override (seconds). Used by inherently
+#                  slow operations like volume_destroy with snapshots, where
+#                  the array can take 30+ seconds to respond. The original UA
+#                  timeout is restored before returning, in every exit path.
 sub _request {
     my ($self, $method, $endpoint, $data, %opts) = @_;
 
     my $url = $self->_build_url($endpoint);
     my $retry_count = $self->{retry_count};
     my $last_error;
+
+    # Per-call timeout override
+    my $orig_timeout = $self->{_ua}->timeout();
+    if ($opts{timeout}) {
+        $self->{_ua}->timeout($opts{timeout});
+    }
+
+    my $restore_timeout = sub {
+        $self->{_ua}->timeout($orig_timeout) if $opts{timeout};
+    };
 
     for my $attempt (1 .. $retry_count) {
         my $req = HTTP::Request->new($method => $url);
@@ -281,6 +300,7 @@ sub _request {
         my $resp = $self->{_ua}->request($req);
 
         if ($resp->is_success) {
+            $restore_timeout->();
             my $content = $resp->decoded_content;
             return {} if !$content || $content eq '';
             my $decoded = eval { decode_json($content) };
@@ -336,10 +356,14 @@ sub _request {
             $last_error .= " (Hint: Array may be in maintenance mode or overloaded)";
         }
 
-        # Session expired - try to refresh
-        if ($code == 401 && $attempt == 1) {
+        # Session expired - try to refresh and retry once
+        if ($code == 401 && $attempt < $retry_count) {
+            warn "Pure Storage API returned 401, refreshing session token (attempt $attempt/$retry_count)\n";
             $self->{_session_token} = undef;
             eval { $self->_create_session(); };
+            # Re-apply per-call timeout override after _create_session may
+            # have rebuilt the UA.
+            $self->{_ua}->timeout($opts{timeout}) if $opts{timeout};
             next if $self->{_session_token};
         }
 
@@ -355,12 +379,13 @@ sub _request {
         }
     }
 
+    $restore_timeout->();
     croak $last_error;
 }
 
 # GET request
 sub get {
-    my ($self, $endpoint, $params) = @_;
+    my ($self, $endpoint, $params, %opts) = @_;
 
     if ($params && %$params) {
         my $uri = URI->new($endpoint);
@@ -368,24 +393,24 @@ sub get {
         $endpoint = $uri->as_string;
     }
 
-    return $self->_request('GET', $endpoint);
+    return $self->_request('GET', $endpoint, undef, %opts);
 }
 
 # POST request
 sub post {
-    my ($self, $endpoint, $data) = @_;
-    return $self->_request('POST', $endpoint, $data);
+    my ($self, $endpoint, $data, %opts) = @_;
+    return $self->_request('POST', $endpoint, $data, %opts);
 }
 
 # PUT request
 sub put {
-    my ($self, $endpoint, $data) = @_;
-    return $self->_request('PUT', $endpoint, $data);
+    my ($self, $endpoint, $data, %opts) = @_;
+    return $self->_request('PUT', $endpoint, $data, %opts);
 }
 
 # PATCH request
 sub patch {
-    my ($self, $endpoint, $data, $params) = @_;
+    my ($self, $endpoint, $data, $params, %opts) = @_;
 
     # Add query parameters if provided
     if ($params && %$params) {
@@ -394,12 +419,12 @@ sub patch {
         $endpoint = $uri->as_string;
     }
 
-    return $self->_request('PATCH', $endpoint, $data);
+    return $self->_request('PATCH', $endpoint, $data, %opts);
 }
 
 # DELETE request
 sub delete {
-    my ($self, $endpoint, $params) = @_;
+    my ($self, $endpoint, $params, %opts) = @_;
 
     # Add query parameters if provided (for API 2.x)
     if ($params && %$params) {
@@ -408,7 +433,7 @@ sub delete {
         $endpoint = $uri->as_string;
     }
 
-    return $self->_request('DELETE', $endpoint);
+    return $self->_request('DELETE', $endpoint, undef, %opts);
 }
 
 #
@@ -704,21 +729,24 @@ sub volume_recover {
     return 1;
 }
 
-# Delete a volume (requires 2 steps: destroy then eradicate)
+# Delete a volume (requires 2 steps: destroy then eradicate).
+# Volume destroy on Pure can be slow when the volume has many snapshots or
+# is part of a pod with replication; use an extended 60s per-call timeout
+# to avoid spurious "command timed out" warnings during normal operation.
 sub volume_delete {
     my ($self, $name, %opts) = @_;
 
     if ($self->is_api_v2()) {
         # API 2.x: PATCH to destroy, then DELETE to eradicate
-        $self->patch("volumes", { destroyed => JSON::true }, { names => $name });
+        $self->patch("volumes", { destroyed => JSON::true }, { names => $name }, timeout => 60);
         unless ($opts{skip_eradicate}) {
-            $self->delete("volumes", { names => $name });
+            $self->delete("volumes", { names => $name }, timeout => 60);
         }
     } else {
         # API 1.x
-        $self->put("volume/$name", { destroyed => JSON::true });
+        $self->put("volume/$name", { destroyed => JSON::true }, timeout => 60);
         unless ($opts{skip_eradicate}) {
-            $self->delete("volume/$name");
+            $self->delete("volume/$name", undef, timeout => 60);
         }
     }
 
@@ -1352,19 +1380,44 @@ sub volume_get_connections {
         # API 2.x: GET /connections?volume_names=volume
         $resp = eval { $self->get("connections", { volume_names => $volume }); };
     } else {
-        # API 1.x
+        # API 1.x: GET /volume/<vol>/host
         $resp = eval { $self->get("volume/$volume/host"); };
     }
     return [] if $@;
-
-    # Handle API 2.x response format
-    if (ref($resp) eq 'HASH' && $resp->{items}) {
-        # Convert to simpler format with host name
-        return [ map { { name => $_->{host}{name} // $_->{host_name} } } @{$resp->{items}} ];
-    }
     return [] unless $resp;
-    return $resp if ref($resp) eq 'ARRAY';
-    return [$resp];
+
+    # Normalise to a single shape regardless of API version. Callers expect
+    # `[ { name => "<host_name>" }, ... ]` so they can do `$conn->{name}`.
+    #
+    # API 2.x raw shape:
+    #   { items => [ { host => { name => "h1" }, host_name => "h1", ... } ] }
+    # API 1.x raw shape (from /volume/<vol>/host):
+    #   [ { "host" => "h1", "lun" => 1, "name" => "myvolume" } ]
+    # Note that on 1.x the `name` field is the VOLUME name, NOT the host
+    # name. Without this normalisation, `$conn->{name}` returned the volume
+    # name and every `volume_disconnect_host` call became a no-op, leaving
+    # orphaned host connections forever.
+
+    if (ref($resp) eq 'HASH' && $resp->{items}) {
+        return [
+            map { { name => $_->{host}{name} // $_->{host_name} } }
+            @{ $resp->{items} }
+        ];
+    }
+    if (ref($resp) eq 'ARRAY') {
+        return [
+            map {
+                {
+                    name => (
+                        ref($_) eq 'HASH'
+                            ? ( $_->{host} // $_->{host_name} // $_->{name} )
+                            : $_
+                    )
+                }
+            } @$resp
+        ];
+    }
+    return [];
 }
 
 # Connect volume to host group

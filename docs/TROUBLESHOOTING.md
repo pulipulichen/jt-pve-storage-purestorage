@@ -1,5 +1,33 @@
 # Troubleshooting Guide
 
+語言 / Language: [English](TROUBLESHOOTING.md) | [繁體中文](TROUBLESHOOTING_zh-TW.md)
+
+## Read first: Multipath Safety Rules
+
+Before doing anything with `multipath` on a Pure-using PVE node, remember:
+
+1. **NEVER use `multipath -F`** (capital F). It flushes ALL unused
+   multipath maps on the host, including non-Pure storage that happens
+   to be idle. Always use lowercase `multipath -f /dev/mapper/<wwid>`
+   for a specific device.
+2. **Use `systemctl restart multipathd`, NOT `reload`.** Reload only
+   re-reads the config file. Restart actually re-applies device-mapper
+   state, which is what you want when changing per-device parameters.
+3. If a stale multipath device cannot be flushed (because of
+   `queue_if_no_path` queueing dead I/O), use this sequence — never
+   `-F`:
+   ```bash
+   multipathd disablequeueing map <wwid>
+   dmsetup message <wwid> 0 fail_if_no_path
+   multipath -f /dev/mapper/<wwid>
+   # If still stuck:
+   dmsetup remove --force --retry <wwid>
+   ```
+4. The plugin (1.1.0+) handles cluster-wide cleanup automatically via
+   the WWID tracking file at `/var/lib/pve-storage-purestorage/<storeid>-wwids.json`
+   and the orphan-cleanup pass that runs in `pvesm status`. In most
+   cases manual cleanup should not be necessary.
+
 ## Common Issues
 
 ### 1. Storage Not Appearing in PVE
@@ -7,23 +35,30 @@
 **Symptoms:**
 - Storage not visible in PVE Web UI
 - `pvesm status` shows storage as unavailable
+- `pvesm status` takes 30+ seconds to return
 
 **Solutions:**
 
-1. Check connectivity to Pure Storage:
+1. Check connectivity to Pure Storage management:
    ```bash
-   curl -k https://<PURE_IP>/api/1.19/array
+   curl -k https://<PURE_IP>/api/2.26/api_version
    ```
 
 2. Verify API token is correct:
    ```bash
-   curl -k -H "api-token: YOUR_TOKEN" https://<PURE_IP>/api/1.19/array
+   curl -k -X POST https://<PURE_IP>/api/2.26/login \
+       -H "api-token: YOUR_TOKEN" -i
    ```
+   You should get HTTP 200 with an `x-auth-token` response header.
 
 3. Check PVE logs:
    ```bash
    journalctl -u pvedaemon -f
    ```
+
+4. If `pvesm status` returns slowly (10-35s), the API is unreachable.
+   The plugin fails fast at 15s × 2 retries = ~34s worst case. Anything
+   longer means the request layer is broken — check firewall, DNS, MTU.
 
 ### 2. Volume Creation Fails
 
@@ -33,196 +68,299 @@
 
 **Solutions:**
 
-1. Check Pure Storage capacity:
-   ```bash
-   curl -k -H "api-token: TOKEN" https://<PURE_IP>/api/1.19/array?space=true
-   ```
+1. Check Pure Storage capacity (Web UI > Storage > Array space).
 
-2. Verify host exists on Pure Storage:
-   ```bash
-   curl -k -H "api-token: TOKEN" https://<PURE_IP>/api/1.19/host
-   ```
+2. Verify Pure host object exists (check Web UI > Storage > Hosts):
+   - Per-node mode: should see `pve-<cluster>-<nodename>`
+   - Shared mode: should see `pve-<cluster>-shared`
 
-3. Check for naming conflicts:
-   ```bash
-   curl -k -H "api-token: TOKEN" "https://<PURE_IP>/api/1.19/volume?names=pve-*"
-   ```
+3. Check for naming conflicts in Pure UI under Storage > Volumes.
 
-### 3. Device Not Appearing After Volume Connection
+4. Concurrent allocations on the same VM may collide on disk-id; the
+   plugin retries up to 5 times. If you hit a persistent collision,
+   one of the workers may have left a partial volume — check Pure UI
+   for orphaned `pve-*` volumes.
+
+### 3. Device Not Appearing After Volume Creation
 
 **Symptoms:**
-- VM disk created but device path not found
+- VM disk created on the array but device path not found locally
 - VM fails to start with "cannot find device" error
 
 **Solutions:**
 
-1. Rescan iSCSI sessions:
+1. Verify volume is connected to this node's host (Pure UI > Volumes >
+   the volume > Connected Hosts).
+
+2. Check iSCSI sessions (one session per Pure portal):
+   ```bash
+   iscsiadm -m session
+   ```
+   Pure controllers share one IQN across multiple LIFs, so you should
+   see N sessions where N is the number of Pure iSCSI portals.
+
+3. Force a rescan (the plugin does this automatically; only needed for
+   manual debugging):
    ```bash
    iscsiadm -m session --rescan
-   ```
-
-2. Rescan SCSI hosts:
-   ```bash
-   for host in /sys/class/scsi_host/host*/scan; do echo "- - -" > $host; done
-   ```
-
-3. Reload multipath:
-   ```bash
+   for h in /sys/class/scsi_host/host*/scan; do echo "- - -" > "$h"; done
    multipathd reconfigure
-   multipath -v2
+   udevadm trigger --subsystem-match=block
+   udevadm settle --timeout=5
    ```
 
 4. Check multipath status:
    ```bash
    multipathd show maps
    multipathd show paths
+   multipath -ll | grep -A4 "PURE"
    ```
 
-### 4. Snapshot Operations Fail
+5. The plugin's `path()` retry loop runs up to `pure-device-timeout`
+   seconds (default 30, configurable per-storage). If it still can't
+   find the device, you'll see a clear error with `multipath -ll`
+   debugging hints in the message.
+
+### 4. `qm resize` fails with "Cannot grow device files"
+
+**Symptom:** Pure shows the new volume size but PVE / QEMU reports
+`Cannot grow device files`.
+
+**Cause:** Was the resize bug fixed in 1.1.2 — the host scan after
+`volume_resize` did not refresh the existing device's capacity. If
+you're on 1.1.2 or later this should not happen.
+
+**If it still happens after upgrading to 1.1.2+:**
+
+```bash
+# Manually do what the plugin should have done:
+WWID=$(... look up the volume's WWID ...)
+DEV=/dev/mapper/$WWID
+SLAVES=$(ls /sys/block/$(basename $(readlink $DEV))/slaves/)
+for s in $SLAVES; do echo 1 > /sys/block/$s/device/rescan; done
+multipathd resize map $(basename $DEV)
+blockdev --getsize64 $DEV   # should now show the new size
+```
+
+### 5. Snapshot rollback returns stale data
+
+**Symptom:** After `qm rollback`, the VM reads pre-rollback data.
+
+**Cause:** Was the rollback cache bug fixed in 1.1.2 — the kernel page
+cache wasn't invalidated after the rollback. If you're on 1.1.2 or
+later this should not happen.
+
+**If it still happens after upgrade,** stop the VM and start it again
+to flush qemu's own cache.
+
+### 6. Stale multipath devices on cluster nodes
+
+**Symptom:** `multipath -ll` on node B shows a Pure device that no
+longer exists on the array (because node A deleted the volume).
+
+**Solution:** This is exactly what the orphan-cleanup mechanism is
+for. Run `pvesm status pure1` on node B; the cleanup pass runs in a
+backgrounded grandchild and will clean the stale device within seconds.
+
+If it doesn't (e.g. cleanup itself failed because of a hang), check
+the WWID tracking file:
+
+```bash
+cat /var/lib/pve-storage-purestorage/<storeid>-wwids.json
+```
+
+If the stale WWID is in there but the device is still present, the
+cleanup is failing. Check `journalctl -u pvedaemon` for error messages
+from `_cleanup_orphaned_devices`. As a last resort, do the manual
+cleanup sequence from the safety rules above.
+
+If the stale WWID is NOT in the tracking file but `multipath -ll`
+shows it, it's not Pure-managed — maybe a previous plugin version's
+residue or a manually-created LUN. The plugin will print a Phase 3
+warning about it but will not auto-clean.
+
+### 7. iSCSI session count is wrong
+
+**Symptom:** `iscsiadm -m session` shows fewer sessions than the
+number of Pure iSCSI portals.
+
+**Cause (was a 1.0.x bug):** The pre-1.1.0 `is_target_logged_in()`
+checked only the IQN, but Pure controllers share one IQN across
+multiple LIFs, so the second-and-later portal logins were silently
+no-op.
+
+**Fix in 1.1.0+:** Login uses `is_portal_logged_in($portal_addr, $target)`
+which checks the (portal, target) pair correctly.
+
+**If you're on 1.1.0+ and still see this:** verify the Pure portals
+are reachable from this node (`ping`, `nc -vz <portal_ip> 3260`),
+and check `/etc/iscsi/iscsid.conf` for `node.startup = automatic`.
+
+### 8. Authentication errors
 
 **Symptoms:**
-- Snapshot creation fails
-- Rollback fails with error
-
-**Solutions:**
-
-1. Verify volume exists:
-   ```bash
-   curl -k -H "api-token: TOKEN" "https://<PURE_IP>/api/1.19/volume/<volname>"
-   ```
-
-2. Check existing snapshots:
-   ```bash
-   curl -k -H "api-token: TOKEN" "https://<PURE_IP>/api/1.19/volume?snap=true&source=<volname>"
-   ```
-
-### 5. Clone Operation Fails
-
-**Symptoms:**
-- VM clone fails
-- Template conversion fails
-
-**Solutions:**
-
-1. Verify source volume has base snapshot:
-   ```bash
-   curl -k -H "api-token: TOKEN" "https://<PURE_IP>/api/1.19/volume/<volname>.pve-base"
-   ```
-
-2. Check if target volume name already exists
-
-### 6. Authentication Errors
-
-**Symptoms:**
-- "401 Unauthorized" errors
+- "401 Unauthorized" errors on every API call
 - "Authentication failed" messages
 
 **Solutions:**
 
-1. Regenerate API token on Pure Storage
-2. Check token hasn't expired
-3. Verify user has correct permissions
+1. The plugin auto-retries on 401 with re-auth (1.1.0+). If you see
+   persistent 401s, the API token is genuinely invalid.
+2. Regenerate API token on Pure Storage Web UI (Settings > API Tokens).
+3. Update the storage config: `pvesm set pure1 --pure-api-token <NEW_TOKEN>`.
+4. Verify user has permissions: Volumes/Hosts/Connections create+delete+read+update.
 
-### 7. iSCSI Session Issues
+### 9. `pvesm status` is slow or hangs
 
-**Symptoms:**
-- iSCSI sessions dropping
-- I/O errors in VM
+**Symptom:** `pvesm status` takes more than 35 seconds, or hangs forever.
 
-**Solutions:**
-
-1. Check iSCSI session status:
-   ```bash
-   iscsiadm -m session -P 3
-   ```
-
-2. Verify network connectivity to all iSCSI portals
-
-3. Check for timeout issues in `/etc/iscsi/iscsid.conf`
-
-### 8. Multipath Issues
-
-**Symptoms:**
-- Single path instead of multipath
-- Path failures not being handled
+**Cause:** API or network issue, OR a wedged multipath device causing
+a kernel D-state hang in the cleanup background fork.
 
 **Solutions:**
 
-1. Check multipath configuration:
-   ```bash
-   multipath -ll
-   ```
+1. Check `ps -eo state,pid,cmd | grep '^D'`. If you see processes in D
+   state, you have a wedged device — see "Stale multipath devices" above.
+2. Check API reachability with `curl` (see issue #1).
+3. The plugin's worst-case `pvesm status` time is ~35 seconds (15s × 2
+   API retries). If it takes longer, something is hanging in the
+   background fork that should not block the parent.
 
-2. Verify all paths are active:
-   ```bash
-   multipathd show paths
-   ```
+### 10. Plugin warns about "DANGEROUS MULTIPATH SETTINGS"
 
-3. Check `/etc/multipath.conf` for Pure Storage settings
+**Symptom:** During `dpkg -i ...purestorage...deb`, postinst prints a
+red warning box about `no_path_retry queue` or `dev_loss_tmo infinity`
+in `/etc/multipath.conf`.
+
+**This is correct behaviour.** Those settings, combined with stale
+Pure devices, can put PVE daemons into uninterruptible sleep requiring
+a node reboot. The plugin will NOT auto-modify your config; you must
+fix it manually.
+
+Edit `/etc/multipath.conf`, change the `defaults` section:
+
+```
+defaults {
+    polling_interval        10
+    no_path_retry           30      # was: queue
+    fast_io_fail_tmo        5
+    dev_loss_tmo            60      # was: infinity
+}
+```
+
+Then `systemctl restart multipathd` (NOT `reload`).
+
+### 11. Plugin warns about "STALE PURE MULTIPATH DEVICES"
+
+**Symptom:** Postinst prints a yellow warning listing Pure multipath
+devices with all paths failed.
+
+**This is residue from an older plugin version or a manually-attached
+LUN.** The plugin will NOT auto-clean. Use the manual cleanup sequence
+from the safety rules above for each listed device.
+
+After cleanup, the next `pvesm status pure1` orphan-cleanup pass will
+keep them gone automatically.
 
 ## Diagnostic Commands
 
-### Check Plugin Status
+### Plugin Status
 
 ```bash
 # Verify plugin is loaded
 pvesm pluginlist
 
-# Check storage status
-pvesm status
+# Check storage status (must return < 5s on healthy array)
+time pvesm status
 
 # List volumes
 pvesm list <storage-id>
+
+# Show WWID tracking state
+cat /var/lib/pve-storage-purestorage/<storeid>-wwids.json | python3 -m json.tool
 ```
 
-### Check Pure Storage Connectivity
+### Pure Storage Connectivity
 
 ```bash
-# Test API access
-curl -k -H "api-token: TOKEN" https://<PURE_IP>/api/1.19/array
+# API reachability
+curl -k https://<PURE_IP>/api/api_version
 
-# List volumes
-curl -k -H "api-token: TOKEN" https://<PURE_IP>/api/1.19/volume
+# Auth
+curl -k -X POST https://<PURE_IP>/api/2.26/login -H "api-token: TOKEN" -i
 
-# List hosts
-curl -k -H "api-token: TOKEN" https://<PURE_IP>/api/1.19/host
+# List volumes (replace SESSION_TOKEN with the x-auth-token from login)
+curl -k -H "x-auth-token: SESSION_TOKEN" https://<PURE_IP>/api/2.26/volumes
 ```
 
-### Check Block Device Status
+### Block Device Status
 
 ```bash
-# List block devices
-lsblk
+# Pure multipath devices on this node
+multipath -ll | grep -A6 "PURE"
 
-# Check multipath
-multipathd show maps
-multipathd show paths
+# Specific device
+multipath -ll <wwid>
 
-# Check iSCSI
+# Slave devices for a multipath device
+ls /sys/block/$(basename $(readlink /dev/mapper/<wwid>))/slaves/
+
+# Holders (LVM, dm-crypt, etc.) for a multipath device
+ls /sys/block/$(basename $(readlink /dev/mapper/<wwid>))/holders/
+```
+
+### iSCSI
+
+```bash
+# All sessions (should be one per Pure portal)
+iscsiadm -m session
+
+# Detailed session view including LUNs
 iscsiadm -m session -P 3
+
+# Targets (after discovery)
+iscsiadm -m node
 ```
 
-### Check Logs
+### Fibre Channel
 
 ```bash
-# PVE daemon logs
+# HBA port states (all Online?)
+cat /sys/class/fc_host/host*/port_state
+
+# Pure target ports visible via fabric
+cat /sys/class/fc_remote_ports/rport-*/port_state
+```
+
+### Logs
+
+```bash
+# PVE daemon (most plugin warn() output goes here)
 journalctl -u pvedaemon -f
 
-# System messages
-dmesg | tail -100
+# Kernel multipath / SCSI messages
+dmesg | grep -E "multipath|scsi|sd|dm-" | tail -50
 
-# iSCSI logs
+# iSCSI daemon
 journalctl -u iscsid -f
+
+# Postinst warnings (next install)
+dpkg -i jt-pve-storage-purestorage_*.deb 2>&1 | tee /tmp/postinst.log
 ```
 
 ## Getting Help
 
 If you continue to experience issues:
 
-1. Check PVE forum for similar issues
-2. Review Pure Storage support documentation
-3. Open an issue on GitHub with:
-   - PVE version
-   - Pure Storage model and Purity version
-   - Error messages
-   - Relevant log output
+1. Run the smoke test from `docs/TESTING.md` Section 16 — those four
+   regression tests directly exercise the most-likely-to-bite bug
+   classes.
+2. Collect the diagnostic output from this guide.
+3. Check the project README troubleshooting section.
+4. Open an issue on GitHub with:
+   - Plugin version (`dpkg -l jt-pve-storage-purestorage`)
+   - PVE version (`pveversion`)
+   - Pure model and Purity//FA version
+   - Error messages and relevant log output
+   - Output of `multipath -ll` and `iscsiadm -m session`
+   - Contents of `/var/lib/pve-storage-purestorage/<storeid>-wwids.json`

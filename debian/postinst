@@ -1,6 +1,157 @@
 #!/bin/bash
 set -e
 
+MULTIPATH_CONF="/etc/multipath.conf"
+
+# ANSI colors
+RED='\033[0;31m'
+YEL='\033[0;33m'
+GRN='\033[0;32m'
+BLU='\033[0;34m'
+RST='\033[0m'
+
+print_safety_warning() {
+    cat <<'BANNER'
+
+==============================================================================
+ Pure Storage Plugin: CRITICAL Multipath Safety Rules
+==============================================================================
+ 1. NEVER run `multipath -F` (capital F). It flushes ALL unused multipath
+    maps system-wide. In a mixed environment this will disconnect any
+    storage that is currently idle, including non-Pure storage. Always use
+    lowercase `multipath -f /dev/mapper/<wwid>` to flush a specific map.
+
+ 2. To reload multipath configuration after editing /etc/multipath.conf,
+    use `systemctl restart multipathd` — NOT `systemctl reload multipathd`.
+    Reload only re-reads the file; restart actually reapplies device-mapper
+    state. The plugin uses restart in its own helpers for the same reason.
+
+ 3. Recommended Pure-friendly multipath.conf settings:
+        path_selector       "queue-length 0"
+        path_grouping_policy group_by_prio
+        prio                alua
+        hardware_handler    "1 alua"
+        failback            immediate
+        no_path_retry       30
+        fast_io_fail_tmo    5
+        dev_loss_tmo        60
+
+ 4. AVOID `no_path_retry queue` and `dev_loss_tmo infinity` for Pure devices.
+    Combined with stale device residue they can put PVE daemons into
+    uninterruptible sleep and require a node reboot.
+==============================================================================
+BANNER
+}
+
+detect_dangerous_multipath_settings() {
+    [ -f "$MULTIPATH_CONF" ] || return 0
+
+    local found=0
+    local hits=""
+    if grep -Eq '^[[:space:]]*no_path_retry[[:space:]]+queue\b' "$MULTIPATH_CONF"; then
+        hits+="  - no_path_retry queue (in $MULTIPATH_CONF)\n"
+        found=1
+    fi
+    if grep -Eq '^[[:space:]]*queue_if_no_path\b' "$MULTIPATH_CONF"; then
+        hits+="  - queue_if_no_path (in $MULTIPATH_CONF)\n"
+        found=1
+    fi
+    if grep -Eq '^[[:space:]]*dev_loss_tmo[[:space:]]+infinity\b' "$MULTIPATH_CONF"; then
+        hits+="  - dev_loss_tmo infinity (in $MULTIPATH_CONF)\n"
+        found=1
+    fi
+
+    if [ "$found" = "1" ]; then
+        printf "${RED}"
+        cat <<EOF
+
+==============================================================================
+ DANGEROUS MULTIPATH SETTINGS DETECTED
+==============================================================================
+ The following settings can put PVE into an unrecoverable hang when a Pure
+ LUN is deleted on the array but still has stale local devices:
+
+EOF
+        printf "$hits"
+        cat <<'EOF'
+
+ Recommended replacements:
+   no_path_retry 30
+   fast_io_fail_tmo 5
+   dev_loss_tmo 60
+
+ The plugin will NOT modify your /etc/multipath.conf automatically. Please
+ review and adjust manually, then run:
+   systemctl restart multipathd      # restart, NOT reload
+==============================================================================
+
+EOF
+        printf "${RST}"
+    fi
+}
+
+detect_stale_pure_devices() {
+    command -v multipath >/dev/null 2>&1 || return 0
+    command -v awk >/dev/null 2>&1 || return 0
+
+    # `multipath -ll` itself can hang; bound it.
+    local out
+    out=$(timeout 15 multipath -ll 2>/dev/null) || return 0
+
+    # Parse blocks: a map line like "3624a9370abcdef0 dm-3 PURE,FlashArray ..."
+    # followed by indented path lines whose status fields show 'failed' or
+    # 'faulty'. We list maps where every path is failed/faulty.
+    local stale
+    stale=$(echo "$out" | awk '
+        /^[a-z0-9]+ dm-[0-9]+ PURE/ {
+            if (name && pathcount > 0 && pathcount == failcount) {
+                print name
+            }
+            name=$1; pathcount=0; failcount=0; next
+        }
+        /[ \t]+(active|failed|faulty)[ \t]+(ready|faulty|ghost|shaky)/ {
+            pathcount++
+            if ($0 ~ /(failed|faulty)[ \t]+(faulty|shaky)/) failcount++
+            if ($0 ~ /failed[ \t]+ready/) failcount++
+        }
+        END {
+            if (name && pathcount > 0 && pathcount == failcount) print name
+        }
+    ')
+
+    if [ -n "$stale" ]; then
+        printf "${YEL}"
+        cat <<'EOF'
+
+==============================================================================
+ STALE PURE MULTIPATH DEVICES DETECTED
+==============================================================================
+ The following Pure multipath devices have all paths failed. They may be
+ leftover residue from a deleted volume on a previous plugin version that
+ did not perform cluster-wide WWID cleanup:
+
+EOF
+        echo "$stale" | sed 's/^/  - /'
+        cat <<'EOF'
+
+ The plugin will NOT auto-clean these because they could be from
+ manually-attached LUNs or other plugins. To remove a stale device safely:
+
+   multipathd disablequeueing map <wwid>
+   dmsetup message <wwid> 0 fail_if_no_path
+   multipath -f /dev/mapper/<wwid>
+   # if multipath -f fails:
+   dmsetup remove --force --retry <wwid>
+
+ Once this plugin (v1.1.0+) is active, the orphan-cleanup pass in status()
+ will pick up any future stale devices automatically.
+==============================================================================
+
+EOF
+        printf "${RST}"
+    fi
+}
+
 case "$1" in
     configure)
         echo "Pure Storage FlashArray Plugin installed successfully."
@@ -36,6 +187,15 @@ case "$1" in
             timeout 10 systemctl enable multipathd 2>/dev/null || true
             timeout 10 systemctl start multipathd 2>/dev/null || true
         fi
+
+        # Create the WWID tracking state directories so the first status()
+        # call doesn't have to.
+        install -d -m 0700 /var/lib/pve-storage-purestorage 2>/dev/null || true
+        install -d -m 0700 /var/run/pve-storage-purestorage 2>/dev/null || true
+
+        print_safety_warning
+        detect_dangerous_multipath_settings
+        detect_stale_pure_devices
         ;;
     abort-upgrade|abort-remove|abort-deconfigure)
         ;;
