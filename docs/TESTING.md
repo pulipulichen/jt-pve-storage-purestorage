@@ -519,6 +519,43 @@ held the post-snapshot pages and reads silently returned stale data.
 
 ---
 
+## 17. iSCSI Host Filter Regression Test (1.1.5)
+
+This test guards against the Bug 1 regression: `rescan_scsi_hosts()`
+must NEVER write to a non-iSCSI scsi_host. Required on any host that
+has mixed scsi_host transports (almost any real server has at least
+the on-board SATA controller as `host0`).
+
+```bash
+# Show the host inventory
+echo "All scsi_host:"
+ls /sys/class/scsi_host/
+echo "iSCSI-only:"
+ls /sys/class/iscsi_host/ 2>/dev/null || echo "(no iSCSI active)"
+
+# Strace the rescan to see exactly which scan files get written
+strace -f -e trace=openat 2>&1 \
+  perl -I/usr/share/perl5 \
+       -e 'use PVE::Storage::Custom::PureStorage::Multipath qw(rescan_scsi_hosts);
+           rescan_scsi_hosts(delay => 0)' \
+  | grep -oE "/sys/class/scsi_host/host[0-9]+/scan" \
+  | sort -u
+```
+
+**Pass criteria:** the strace output must contain ONLY the host
+numbers that appear in `/sys/class/iscsi_host/`. If you see any host
+that is not in the iSCSI list (e.g. `host0/scan` when `host0` is the
+SATA controller), the fix is broken and the bug is back.
+
+**Why this matters:** writing to a non-iSCSI host's scan file on
+HPE smartpqi / Dell PERC / LSI HBA causes a 600+ second D-state hang
+inside the kernel. `sysfs_write_with_timeout` does not protect
+against this — D-state children cannot be reaped by SIGKILL. The
+ONLY safe protection is to never issue the operation in the first
+place.
+
+---
+
 ## Quick smoke test (5 minutes, single node)
 
 If full test plan is too long, the absolute minimum smoke test is:

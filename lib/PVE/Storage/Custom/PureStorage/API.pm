@@ -437,6 +437,97 @@ sub delete {
 }
 
 #
+# Operator-friendly error translation
+#
+
+# Translate Pure FlashArray API error messages into operator-friendly
+# wording. The raw API error tells WHAT happened but not WHY (what limit
+# was hit?) or HOW to recover (delete things, raise the limit, contact
+# Pure support?). This helper pattern-matches known Pure limit errors and
+# prepends a short human summary while preserving the original error.
+#
+# Apply at every die site where backend errors can bubble up to the
+# operator, e.g.:
+#
+#   die "Failed to create volume '$name': " .
+#       PVE::Storage::Custom::PureStorage::API::translate_pure_error($@);
+#
+# Unknown errors pass through unchanged.
+sub translate_pure_error {
+    my ($err) = @_;
+    return $err unless defined $err;
+
+    # Per-array volume count limit. Pure FlashArray has a soft cap on the
+    # total number of volumes per array. Hitting it usually means there
+    # are many destroyed-but-not-eradicated volumes still consuming the
+    # quota — they auto-eradicate after the array's eradication delay
+    # (default 24h).
+    if ($err =~ /maximum number of volumes/i ||
+        $err =~ /volume.*limit.*reached/i ||
+        $err =~ /too many volumes/i ||
+        $err =~ /volume_limit_exceeded/i) {
+        return "Pure FlashArray volume count limit reached. The plugin " .
+               "creates one volume per VM disk, so this means the array " .
+               "is at its volume cap. Check Pure UI > Storage > Volumes " .
+               "for destroyed volumes still in the eradication delay " .
+               "window (default 24h) — they continue to count against " .
+               "the cap. Either wait, eradicate them manually, or ask " .
+               "your storage admin to raise the limit. Original error: $err";
+    }
+
+    # Per-volume snapshot limit
+    if ($err =~ /maximum number of snapshots/i ||
+        $err =~ /snapshot.*limit.*reached/i ||
+        $err =~ /too many snapshots/i) {
+        return "Pure FlashArray snapshot count limit reached. Check Pure " .
+               "UI > Protection > Volume Snapshots and delete old " .
+               "PVE-managed snapshots, or ask your storage admin to raise " .
+               "the limit. Original error: $err";
+    }
+
+    # Host or host-group connection limit
+    if ($err =~ /maximum.*connection/i ||
+        $err =~ /host.*limit/i ||
+        $err =~ /connection.*limit.*reached/i) {
+        return "Pure FlashArray host connection limit reached. Each PVE " .
+               "node has its own host object (per-node mode) connected " .
+               "to every Pure-managed VM disk. Either reduce the number " .
+               "of disks, switch to shared host mode, or ask your storage " .
+               "admin to raise the limit. Original error: $err";
+    }
+
+    # Protection group limit
+    if ($err =~ /maximum.*protection.*group/i ||
+        $err =~ /pgroup.*limit/i) {
+        return "Pure FlashArray protection group limit reached. " .
+               "Original error: $err";
+    }
+
+    # Capacity exhaustion (thin overcommit hitting physical limit, OR
+    # provisioned capacity quota)
+    if ($err =~ /no space|insufficient.*space|out.*of.*space|array.*full|capacity.*exceed/i) {
+        return "Pure FlashArray is out of space. With thin provisioning, " .
+               "this can happen even though individual volumes appear to " .
+               "have free space — the physical array is full. Check Pure " .
+               "UI > Storage > Array dashboard. Free up space by " .
+               "destroying unused volumes (and waiting for eradication) " .
+               "or expanding the array. Original error: $err";
+    }
+
+    # API rate limit
+    if ($err =~ /429|rate.*limit|too many requests/i) {
+        return "Pure FlashArray API rate limit hit (HTTP 429). The plugin " .
+               "will back off and retry. If this happens repeatedly, you " .
+               "may have many PVE nodes hitting the same array " .
+               "simultaneously — consider increasing the API token's rate " .
+               "quota in Pure UI > Settings > Users. Original error: $err";
+    }
+
+    # Pass through unknown errors unchanged.
+    return $err;
+}
+
+#
 # Array operations
 #
 

@@ -1,4 +1,85 @@
-jt-pve-storage-purestorage (1.1.4-1) stable; urgency=high
+jt-pve-storage-purestorage (1.1.6-1) stable; urgency=high
+
+  * [CRITICAL] postinst now reloads ALL three PVE services that load
+    storage plugin code: pvedaemon, pvestatd, pveproxy. Previous
+    versions did not reload ANY of them, meaning old bug-containing
+    code (e.g. the pre-1.1.5 rescan_scsi_hosts that writes to all
+    SCSI hosts) stayed in memory indefinitely until manual service
+    restart. pvestatd is particularly dangerous: it polls status()
+    every 10 seconds, and if the old code triggers D-state children
+    (e.g. on HPE smartpqi), the node accumulates unkillable D-state
+    processes until a hardware watchdog or manual reboot intervenes.
+    Changed from `systemctl restart` to `systemctl reload` (SIGHUP)
+    to avoid the stop-phase hang: if the old code created D-state
+    children, the stop phase blocks waiting for unkillable processes.
+    reload sends SIGHUP which makes PVE::Daemon re-exec() itself
+    with new code, bypassing the stop phase entirely.
+
+  * [HIGH] postinst now checks /etc/lvm/lvm.conf for `global_filter`
+    and warns if absent. On PVE nodes upgraded from 7/8 to 9, the old
+    lvm.conf lacks the filter that excludes device-mapper and
+    multipath devices from LVM scanning. Without it, the host LVM
+    auto-activates VGs found inside guest VM disks (which are raw
+    LUNs visible as multipath devices), creating holder dm devices
+    on top of the multipath device. These holders cause
+    is_device_in_use() to correctly block free_image from deleting
+    the volume. The warning includes the recommended filter setting
+    and the exact commands to deactivate already-activated guest VGs.
+
+  * [HIGH] free_image() now provides detailed usage information when
+    is_device_in_use() blocks deletion. New get_device_usage_details()
+    helper in Multipath.pm enumerates holder device names, dm-names,
+    detects LVM VG names from dm-name conventions, and explains the
+    root cause (host LVM auto-activation on upgraded PVE nodes) with
+    exact remediation: `vgchange -an <vg>` to deactivate immediately,
+    `global_filter` setting for long-term fix.
+
+ -- Jason Cheng (Jason Tools) <jason@jason.tools>  Thu, 10 Apr 2026 14:00:00 +0800
+
+jt-pve-storage-purestorage (1.1.5-1) stable; urgency=high
+
+  * [CRITICAL] rescan_scsi_hosts() iterated every entry in
+    /sys/class/scsi_host/, including non-iSCSI hosts (HPE Smart Array
+    P408i-a and similar HBAs). Writing "- - -" to those scan files
+    triggered driver-side full target rescans which entered D-state for
+    600+ seconds inside the smartpqi / megaraid_sas / mpt3sas drivers.
+    sysfs_write_with_timeout() protects the parent process but does
+    NOT protect the kernel: D-state children cannot be reaped by
+    SIGKILL and they hold kernel scan locks until the driver finishes,
+    causing cascading config-lock timeouts on every subsequent VM
+    operation, and pvedaemon restart hangs requiring force-reboot. The
+    bug was latent in every release prior to 1.1.5 and would have
+    surfaced as soon as a customer deployed on HPE ProLiant, Dell PERC,
+    Lenovo ThinkSystem, or any server with a SAS HBA / hardware RAID
+    controller. Fixed by sourcing the host list from
+    /sys/class/iscsi_host/ instead of /sys/class/scsi_host/. The
+    scsi_transport_iscsi layer registers every iSCSI host there via
+    iscsi_host_alloc(), regardless of underlying driver (iscsi_tcp,
+    iser, bnx2i, qla4xxx, qedi, be2iscsi, cxgb3i, cxgb4i, ...). Non-
+    iSCSI drivers categorically never register there, so iterating
+    that class is both exhaustive and safe. Verified on a real host
+    with mixed scsi_host (host0-3 non-iSCSI + host4-7 iSCSI): strace
+    confirms writes only happen on host4-7 after the fix.
+
+  * [HIGH] FC.pm rescan_fc_hosts() used bare open() to write
+    /sys/class/fc_host/<host>/issue_lip and /sys/class/scsi_host/<host>/scan,
+    which can hang the parent process if the FC HBA is wedged. The
+    SCSI scan loop already filtered to FC hosts only (via
+    get_fc_hosts() — no Bug 1 risk there), but the bare open() means
+    the parent worker stalls instead of moving on after a timeout.
+    Fixed by routing both writes through sysfs_write_with_timeout(),
+    matching the protection already applied in Multipath.pm.
+
+  * [LOW operator UX] Add translate_pure_error() helper in API.pm and
+    apply it to alloc_image / clone_image / volume_snapshot die sites.
+    Pure FlashArray's raw API errors tell operators WHAT happened
+    (e.g. "Maximum number of volumes reached") but not WHY (what's
+    the cap?) or HOW to recover (delete things, wait for eradication,
+    raise the limit). The translator pattern-matches Pure's known
+    limit errors (volume count, snapshot count, host connection
+    count, protection group count, capacity exhaustion, API rate
+    limit) and prepends a human summary while preserving the
+    original error. Unknown errors pass through unchanged.
 
   * Six more bugs found by an internal deep audit after 1.1.3, applying
     the "sibling pattern" rule (every bug fix triggers a codebase-wide

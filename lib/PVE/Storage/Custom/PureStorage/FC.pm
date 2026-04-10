@@ -10,6 +10,8 @@ use warnings;
 use Carp qw(croak);
 use File::Basename qw(basename);
 
+use PVE::Storage::Custom::PureStorage::Multipath qw(sysfs_write_with_timeout);
+
 use Exporter qw(import);
 
 our @EXPORT_OK = qw(
@@ -259,31 +261,38 @@ sub rescan_fc_hosts {
     # Build set of FC host names for targeted SCSI rescan
     my %fc_host_set = map { $_ => 1 } @$hosts;
 
+    # Issue LIP and SCSI scan use sysfs_write_with_timeout (not bare
+    # open()) — even though we filter to FC hosts only (which is the
+    # categorical safety from to_pure5 Bug 1), the write itself can
+    # still hang in the kernel if the FC HBA is wedged. Bare open()
+    # blocks the parent worker; the timeout-bounded helper at least
+    # returns control after 10s and lets the caller move on.
+    #
+    # Note: D-state children still cannot be killed by SIGKILL — see
+    # the rescan_scsi_hosts() comment in Multipath.pm. The categorical
+    # protection here is that we ONLY iterate hosts already in
+    # @$hosts (returned by get_fc_hosts() which queries
+    # /sys/class/fc_host/), so we never touch a non-FC HBA.
     for my $host (@$hosts) {
         # Issue LIP (Loop Initialization Primitive)
         my $issue_lip_file = FC_HOST_PATH . "/$host/issue_lip";
         if (-w $issue_lip_file) {
-            eval {
-                open(my $fh, '>', $issue_lip_file) or die "Cannot open $issue_lip_file: $!";
-                print $fh "1\n";
-                close($fh);
+            if (sysfs_write_with_timeout($issue_lip_file, "1\n", 10)) {
                 $rescanned++;
-            };
-            warn "Failed to issue LIP on $host: $@\n" if $@;
+            } else {
+                warn "Failed to issue LIP on $host (timeout or error)\n";
+            }
         }
     }
 
-    # Trigger SCSI host scan only for FC-related hosts (not iSCSI/SAS/local)
+    # Trigger SCSI host scan only for FC-related hosts. Source the
+    # name list from get_fc_hosts() so we never touch a non-FC HBA.
     my $scsi_host_path = '/sys/class/scsi_host';
     if (-d $scsi_host_path) {
         for my $host (@$hosts) {
             my $scan_file = "$scsi_host_path/$host/scan";
             if (-w $scan_file) {
-                eval {
-                    open(my $fh, '>', $scan_file) or die "Cannot open $scan_file: $!";
-                    print $fh "- - -\n";
-                    close($fh);
-                };
+                sysfs_write_with_timeout($scan_file, "- - -\n", 10);
             }
         }
     }

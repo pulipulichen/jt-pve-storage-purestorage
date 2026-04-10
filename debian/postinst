@@ -152,6 +152,81 @@ EOF
     fi
 }
 
+detect_missing_lvm_global_filter() {
+    local LVMCONF="/etc/lvm/lvm.conf"
+    [ -f "$LVMCONF" ] || return 0
+
+    # Check if global_filter is set (uncommented, with at least one rule).
+    if grep -Eq '^\s*global_filter\s*=' "$LVMCONF"; then
+        return 0
+    fi
+
+    printf "${YEL}"
+    cat <<'EOF'
+
+==============================================================================
+ MISSING LVM global_filter — HOST LVM MAY ACTIVATE GUEST VGs
+==============================================================================
+ Your /etc/lvm/lvm.conf does not have a `global_filter` setting. This is
+ common on PVE nodes upgraded from earlier versions (7 -> 8 -> 9). Without
+ it, the host's LVM scanner (vgscan/pvscan) reads ALL block devices
+ including Pure-managed multipath LUNs, and may auto-activate VGs that
+ exist INSIDE guest VM disks. These activated VGs appear as "holders" on
+ the multipath device, which prevents the plugin from deleting the volume.
+
+ The symptoms are:
+   - `pvesm free` fails with "device is still in use (has holders)"
+   - `vgs` / `pvs` shows duplicate VG name warnings
+   - /sys/block/<dm-N>/holders/ has unexpected dm-* entries
+
+ Recommended fix: add the following to /etc/lvm/lvm.conf under the
+ `devices { }` section:
+
+     global_filter = [ "r|/dev/mapper/360.*|", "r|/dev/dm-.*|", "a|.*|" ]
+
+ This rejects Pure (and other SAN) multipath devices from LVM scanning
+ while allowing everything else. After editing:
+
+     vgchange -an <guest_vg_name>    # deactivate any already-activated guest VGs
+     systemctl restart lvm2-monitor
+     vgscan --cache
+
+ Fresh PVE 9 installs already have this filter. Upgraded nodes do not.
+==============================================================================
+
+EOF
+    printf "${RST}"
+}
+
+reload_pve_services() {
+    # PVE services load Perl plugin modules at startup and keep them in
+    # memory (shared via COW in forked workers). Installing new .pm files
+    # does NOT affect running services — they must be reloaded.
+    #
+    # Three services load storage plugins:
+    #   pvedaemon  — qm/pvesm operations
+    #   pvestatd   — periodic status() polling every ~10 seconds
+    #   pveproxy   — web UI API
+    #
+    # Use `systemctl reload` (SIGHUP → PVE::Daemon re-exec) instead of
+    # `restart` (stop+start). If the old code created D-state children
+    # (e.g. from the pre-1.1.5 scsi_host scan bug on HPE hardware), the
+    # stop phase hangs waiting for unkillable D-state children. reload
+    # bypasses the stop phase entirely.
+    #
+    # If a service is not running (e.g. fresh install), use `start`.
+
+    for svc in pvedaemon pvestatd pveproxy; do
+        if timeout 5 systemctl is-active --quiet "$svc" 2>/dev/null; then
+            timeout 30 systemctl reload "$svc" 2>/dev/null || \
+                echo "  [WARN] Could not reload $svc (D-state children from old code?)"
+        else
+            timeout 30 systemctl start "$svc" 2>/dev/null || true
+        fi
+    done
+    echo "PVE services reloaded to pick up new plugin code."
+}
+
 case "$1" in
     configure)
         echo "Pure Storage FlashArray Plugin installed successfully."
@@ -196,6 +271,8 @@ case "$1" in
         print_safety_warning
         detect_dangerous_multipath_settings
         detect_stale_pure_devices
+        detect_missing_lvm_global_filter
+        reload_pve_services
         ;;
     abort-upgrade|abort-remove|abort-deconfigure)
         ;;

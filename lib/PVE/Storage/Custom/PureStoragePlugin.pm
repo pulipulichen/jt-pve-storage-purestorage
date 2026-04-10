@@ -57,6 +57,7 @@ use PVE::Storage::Custom::PureStorage::Multipath qw(
     get_multipath_slaves
     remove_scsi_device
     list_pure_multipath_devices
+    get_device_usage_details
 );
 use PVE::Storage::Custom::PureStorage::FC qw(
     get_fc_wwpns
@@ -1579,10 +1580,8 @@ sub alloc_image {
             next;
         }
 
-        if ($err =~ /quota/i || $err =~ /capacity/i) {
-            die "Failed to create volume '$pure_volname': insufficient storage capacity or quota exceeded. $err";
-        }
-        die "Failed to create volume '$pure_volname': $err";
+        die "Failed to create volume '$pure_volname': " .
+            PVE::Storage::Custom::PureStorage::API::translate_pure_error($err);
     }
 
     # Connect volume to all cluster hosts for migration support
@@ -1759,8 +1758,17 @@ sub free_image {
     if ($wwid) {
         my $device = get_device_by_wwid($wwid);
         if ($device && -b $device && is_device_in_use($device)) {
-            die "Cannot delete volume '$volname': device $device is still in use. " .
-                "Ensure VM is stopped and disk is not mounted.";
+            # Provide detailed usage info so operators can self-diagnose.
+            # Common case: host LVM auto-activated guest VGs on upgraded
+            # PVE nodes missing global_filter in lvm.conf.
+            my $details = eval { get_device_usage_details($device) } // '';
+            my $msg = "Cannot delete volume '$volname': device $device is still in use.\n";
+            if ($details) {
+                $msg .= "\n$details\n";
+            } else {
+                $msg .= "Ensure VM is stopped and disk is not mounted.\n";
+            }
+            die $msg;
         }
     }
 
@@ -2448,7 +2456,8 @@ sub volume_snapshot {
     # Create snapshot
     eval { $api->snapshot_create($pure_volname, $snap_suffix); };
     if ($@) {
-        die "Failed to create snapshot '$snap' for volume '$volname': $@";
+        die "Failed to create snapshot '$snap' for volume '$volname': " .
+            PVE::Storage::Custom::PureStorage::API::translate_pure_error($@);
     }
 
     # Backup VM config to Pure Storage
@@ -2897,12 +2906,11 @@ sub clone_image {
             next;
         }
 
-        if ($err =~ /quota/i || $err =~ /capacity/i) {
-            die "Failed to create clone: insufficient storage capacity or quota exceeded. $err";
-        } elsif ($err =~ /not found/i) {
+        if ($err =~ /not found/i) {
             die "Failed to create clone from $source_type: source not found. $err";
         }
-        die "Failed to create clone from $source_type: $err";
+        die "Failed to create clone from $source_type: " .
+            PVE::Storage::Custom::PureStorage::API::translate_pure_error($err);
     }
 
     # Connect cloned volume to all cluster hosts for migration support

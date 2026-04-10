@@ -8,6 +8,96 @@
 
 ---
 
+## [1.1.6] - 2026-04-10
+
+### postinst 必須 reload 所有 PVE 服務 + LVM global_filter 偵測
+
+來自相關專案 jt-pve-storage-netapp Incident 9 (pvestatd 未 reload) 與
+Incident 10 (升級版 PVE 節點上主機 LVM 自動啟用 guest VG) 的兩個問題。
+
+#### 修正
+- **[重大] postinst 現在會在安裝後 reload pvedaemon、pvestatd、以及
+  pveproxy。** 過去的版本**不會** reload 任何 PVE 服務,代表含舊 bug
+  的程式碼會一直留在記憶體中無限期執行。特別是 pvestatd 每 10 秒
+  輪詢 `status()` — 若舊程式碼觸發 D-state 子行程 (例如 1.1.5 之前
+  的 SCSI host scan bug 在 HPE 硬體上),D-state 行程會不斷累積,直到
+  硬體 watchdog 或手動重新開機介入。
+
+  從 `systemctl restart` 改為 `systemctl reload` (SIGHUP)。若舊程式碼
+  已經產生 D-state 子行程,`restart` 的 stop phase 會卡在等待無法
+  kill 的行程。`reload` 發送 SIGHUP,讓 `PVE::Daemon` 以 `re-exec()`
+  自己載入新程式碼,完全跳過 stop phase。
+- **[高] postinst 現在會檢查 `/etc/lvm/lvm.conf` 是否有
+  `global_filter`,並在缺少時警告。** 在從 PVE 7/8 升級到 9 的節點上,
+  舊的 `lvm.conf` 缺少排除 device-mapper 和 multipath 裝置免於 LVM
+  掃描的 filter。主機 LVM 會自動啟用 guest VM 磁碟內的 VG (那些是以
+  multipath 裝置形式呈現的原始 LUN),在 multipath 裝置上方建立
+  holder dm 裝置。這些 holder 讓 `is_device_in_use()` 正確擋住
+  `free_image()` 的刪除,但舊版錯誤訊息無法讓操作員自行診斷。
+- **[高] `free_image()` 現在在 `is_device_in_use()` 擋住刪除時提供
+  詳細的使用狀態資訊。** `Multipath.pm` 新增的
+  `get_device_usage_details()` helper 會列舉 holder 裝置名稱、
+  dm-name,從 dm-name 慣例偵測 LVM VG 名稱,並說明根本原因
+  (升級版 PVE 節點上的主機 LVM 自動啟用) 以及精確的修復方式:
+  `vgchange -an <vg>` 立即停用,`lvm.conf` 中設定 `global_filter`
+  做長期修正。
+
+---
+
+## [1.1.5] - 2026-04-10
+
+### 重大 — `rescan_scsi_hosts()` 可能在 HPE / Dell / Lenovo HBA 上掛起
+
+自 1.0.0 起就存在的潛在 bug,在第一位客戶把外掛部署到 HPE ProLiant、
+Dell PERC、Lenovo ThinkSystem 或任何同時有 SAS HBA / 硬體 RAID 控制器
+與 iSCSI 卡的伺服器上就會浮現。**所有更早版本都受影響。強烈建議升級。**
+
+#### 修正
+- **[重大] `rescan_scsi_hosts()` 過去會迭代 `/sys/class/scsi_host/`
+  下的每一個項目,包含非 iSCSI 的 host。** 對 HPE Smart Array 控制器
+  (smartpqi 驅動)、Dell PERC (megaraid_sas) 或 LSI HBA (mpt3sas) 的
+  scan 檔案寫入 `"- - -"`,會觸發驅動端的完整 target 重新掃描,在
+  kernel 中**進入 D-state 達 600+ 秒**。`sysfs_write_with_timeout()`
+  保護父行程不被阻擋,但**處於 D-state 的子行程無法被 SIGKILL 收回**,
+  而且它會持有 kernel scan lock 直到驅動完成,造成後續每個 VM 操作都
+  發生連鎖的 config-lock timeout,再加上 `pvedaemon` 重新啟動會掛起
+  必須強制重新開機。
+
+  修法:把 host 清單來源從 `/sys/class/scsi_host/` 改為
+  `/sys/class/iscsi_host/`。`scsi_transport_iscsi` 這一層會在任何
+  iSCSI 驅動呼叫 `iscsi_host_alloc()` 時把該 host 註冊到這裡,不論
+  底層是 `iscsi_tcp`、`iser`、`bnx2i`、`qla4xxx`、`qedi`、`be2iscsi`、
+  `cxgb3i`、`cxgb4i`、或任何未來的 iSCSI 驅動。非 iSCSI 驅動絕對
+  不會在這裡註冊,所以迭代這個 class 既完整又安全。
+
+  在實機上驗證 (含 8 個 scsi_host:host0-3 非 iSCSI、host4-7 iSCSI):
+  `strace` 確認修正後只會對 host4-7 寫入。修正前則會對全部 8 個寫入。
+
+  **教訓:** Timeout 保護涵蓋的是父行程,不是 kernel。對於會持有
+  kernel lock 的 sysfs 寫入,正確的修法是「一開始就不執行該操作」,
+  而不是「對該操作做 timeout」。
+- **[高] `FC.pm rescan_fc_hosts()` 使用 bare `open()`** 寫入
+  `/sys/class/fc_host/<host>/issue_lip` 與
+  `/sys/class/scsi_host/<host>/scan`。SCSI scan 迴圈本來就只對 FC
+  host 過濾 (透過 `get_fc_hosts()` — 沒有 Bug 1 風險),但 bare
+  `open()` 代表 HBA 卡死時父行程也會卡住。修法:把兩處寫入都改走
+  `sysfs_write_with_timeout()`,與 `Multipath.pm` 中已有的保護一致。
+
+#### 新增
+- **`API.pm` 中的 `translate_pure_error()` helper**,把 Pure FlashArray
+  原始 API 錯誤訊息轉成對操作員友善的訊息。1.1.5 之前,操作員碰到
+  陣列卷數量上限會看到 `Maximum number of volumes is reached`,完全
+  沒有任何指引。1.1.5 之後會看到一段說明:碰到哪個上限、為什麼
+  「destroyed 但尚未 eradicate 的卷」會占用配額、以及如何恢復。
+  比對 Pure 已知的上限錯誤訊息:per-array 卷數量、per-volume 快照
+  數量、host 連線數量、protection group 數量、容量耗盡、API rate
+  limit。未知的錯誤照原樣傳遞。
+
+  套用在最常見的 die 點:`alloc_image()`、`clone_image()`、
+  `volume_snapshot()`。
+
+---
+
 ## [1.1.4] - 2026-04-09
 
 ### 1.1.3 後內部深度稽核又找到 6 個 bug

@@ -32,6 +32,7 @@ our @EXPORT_OK = qw(
     sysfs_write_with_timeout
     sysfs_read_with_timeout
     list_pure_multipath_devices
+    get_device_usage_details
 );
 
 # Constants
@@ -291,28 +292,68 @@ sub _run_cmd {
     return wantarray ? ($stdout, $stderr, $exit_code) : $stdout;
 }
 
-# Rescan all SCSI hosts for new devices
+# Rescan all iSCSI SCSI hosts for new devices.
+#
+# CRITICAL: this function only iterates iSCSI hosts via
+# /sys/class/iscsi_host/, NOT every entry in /sys/class/scsi_host/.
+#
+# Background: writing "- - -" to a non-iSCSI host's
+# /sys/class/scsi_host/hostN/scan file triggers a driver-side full
+# target rescan, which can hang for hundreds of seconds inside HBA
+# drivers. Confirmed in production for HPE ProLiant servers with the
+# smartpqi driver (P408i-a controller): writes entered D-state for
+# 600+ seconds inside sas_user_scan(). D-state children CANNOT be
+# reaped by SIGKILL, and they hold kernel scan locks until the driver
+# finishes, causing cascading lock timeouts across PVE — every
+# subsequent worker that touches the same scsi_host serializes behind
+# the stuck child. Same risk applies to megaraid_sas (Dell PERC,
+# Lenovo ThinkSystem RAID), mpt3sas (LSI HBAs), hpsa, ahci with bad
+# SATA, and any future HBA driver.
+#
+# `sysfs_write_with_timeout()` does NOT save us here — its 10s parent
+# timeout protects the parent process from blocking, but the D-state
+# CHILD remains stuck and the kernel scan lock is still held.
+#
+# The categorically-correct fix is to NOT issue the operation on
+# non-iSCSI hosts in the first place. /sys/class/iscsi_host/ is
+# kernel-maintained: every iSCSI driver registers its hosts there via
+# iscsi_host_alloc() (iscsi_tcp, iser, bnx2i, qla4xxx, qedi, be2iscsi,
+# cxgb3i, cxgb4i, and any future iSCSI driver), and non-iSCSI drivers
+# never do. So iterating that class is both exhaustive (catches every
+# iSCSI host) and safe (cannot accidentally include a non-iSCSI host).
+#
+# For FC, rescan_fc_hosts() in FC.pm has its own targeted scan loop
+# that only touches FC hosts.
 sub rescan_scsi_hosts {
     my (%opts) = @_;
 
-    opendir(my $dh, SCSI_HOST_PATH) or croak "Cannot open " . SCSI_HOST_PATH . ": $!";
+    my $iscsi_class = '/sys/class/iscsi_host';
+    if (! -d $iscsi_class) {
+        # iSCSI transport subsystem not loaded — nothing to rescan.
+        # FC and other protocols handle their own rescans elsewhere.
+        return 1;
+    }
+
+    opendir(my $dh, $iscsi_class) or return 1;
     my @hosts = grep { /^host\d+$/ } readdir($dh);
     closedir($dh);
 
+    # No iSCSI hosts registered (storage not activated yet, or all
+    # sessions disconnected). Nothing to rescan.
+    return 1 unless @hosts;
+
     for my $host (@hosts) {
-        # Untaint host name (validated by grep above)
+        # Untaint host name (validated by grep above).
         ($host) = $host =~ /^(host\d+)$/;
         next unless $host;
 
         my $scan_file = SCSI_HOST_PATH . "/$host/scan";
         if (-w $scan_file) {
-            # Use forked timeout-protected write to prevent D-state hang on
-            # unresponsive HBA / dead session.
             sysfs_write_with_timeout($scan_file, "- - -\n", 10);
         }
     }
 
-    # Give the kernel time to discover devices
+    # Give the kernel time to discover devices.
     sleep($opts{delay} // 2);
 
     return 1;
@@ -673,6 +714,97 @@ sub list_pure_multipath_devices {
     }
 
     return \@devices;
+}
+
+# Return a human-readable description of WHY a device is in use: mount
+# points, holder device names + dm-names, and detected LVM VGs. Called
+# by free_image when is_device_in_use blocks deletion. The description
+# answers WHAT (which holders), WHY (host LVM auto-activation), and HOW
+# to recover (vgchange -an + global_filter). Returns undef if the device
+# is not in use (or details can't be determined).
+sub get_device_usage_details {
+    my ($device) = @_;
+    return undef unless $device && -b $device;
+
+    my $dev_name = _resolve_block_device_name($device);
+    return undef unless $dev_name;
+
+    my @details;
+
+    # Check mounts
+    my $mounts = sysfs_read_with_timeout('/proc/mounts', 5);
+    if (defined $mounts) {
+        for my $line (split /\n/, $mounts) {
+            if ($line =~ /^\Q$device\E\s+(\S+)/ || $line =~ /^\/dev\/\Q$dev_name\E\s+(\S+)/) {
+                push @details, "Mounted at: $1";
+            }
+        }
+    }
+
+    # Check holders (LVM PV, dm-crypt, dm-raid, bcache, ...)
+    my $holders_dir = "/sys/block/$dev_name/holders";
+    if (-d $holders_dir) {
+        opendir(my $dh, $holders_dir);
+        my @holders = grep { !/^\./ } readdir($dh);
+        closedir($dh);
+
+        if (@holders) {
+            push @details, "[HOLDERS] Device has " . scalar(@holders) . " holder(s) in /sys/block/$dev_name/holders/:";
+
+            my %vgs;
+            for my $h (@holders) {
+                my $dm_name_file = "/sys/block/$h/dm/name";
+                my $dm_name = '';
+                if (-r $dm_name_file) {
+                    $dm_name = sysfs_read_with_timeout($dm_name_file, 3) // '';
+                    chomp $dm_name;
+                }
+                my $label = $dm_name ? "/dev/$h (dm-name: $dm_name)" : "/dev/$h";
+                push @details, "    $label";
+
+                # Parse LVM dm-name convention: <vgname>-<lvname>
+                # LVM escapes hyphens in VG names as double-hyphens.
+                if ($dm_name && $dm_name =~ /^(.+)-([^-]+)$/) {
+                    my $vg_raw = $1;
+                    $vg_raw =~ s/--/-/g;  # unescape double hyphens
+                    $vgs{$vg_raw} = 1;
+                }
+            }
+
+            if (%vgs) {
+                my $vg_list = join(', ', sort keys %vgs);
+                push @details, "";
+                push @details, "  Detected LVM VG(s): $vg_list";
+                push @details, "  These are likely host-level LVM auto-activation of VGs found inside the VM disk.";
+                push @details, "  This happens on PVE nodes upgraded from 7/8 to 9 that are missing";
+                push @details, "  the `global_filter` setting in /etc/lvm/lvm.conf.";
+                push @details, "";
+                push @details, "  To resolve:";
+                for my $vg (sort keys %vgs) {
+                    push @details, "    vgchange -an $vg";
+                }
+                push @details, "  Then retry the delete operation.";
+                push @details, "";
+                push @details, "  To prevent recurrence after reboot, add to /etc/lvm/lvm.conf:";
+                push @details, '    global_filter = [ "r|/dev/mapper/360.*|", "r|/dev/dm-.*|", "a|.*|" ]';
+            }
+        }
+    }
+
+    # Check fuser
+    my $safe_device = _untaint_device_path($device);
+    if ($safe_device) {
+        my ($stdout, undef, $exit) = eval {
+            _run_cmd(['/bin/fuser', $safe_device],
+                timeout => 5, allow_nonzero => 1, ignore_errors => 1);
+        };
+        if (!$@ && defined $exit && $exit == 0 && $stdout) {
+            chomp $stdout;
+            push @details, "Open by process(es): $stdout";
+        }
+    }
+
+    return @details ? join("\n", @details) : undef;
 }
 
 # Check if a device is currently in use (mounted, open by process, or has

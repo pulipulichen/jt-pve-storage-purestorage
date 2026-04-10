@@ -504,6 +504,40 @@ qm destroy 8000 --purge
 
 ---
 
+## 17. iSCSI Host 過濾迴歸測試 (1.1.5)
+
+此測試防範 Bug 1 迴歸:`rescan_scsi_hosts()` **絕對不可**寫入非
+iSCSI 的 scsi_host。任何具有混合 scsi_host 傳輸層的主機都應跑此
+測試 (幾乎任何真實伺服器都至少有主機板上的 SATA 控制器作為
+`host0`)。
+
+```bash
+# 顯示 host 清單
+echo "所有 scsi_host:"
+ls /sys/class/scsi_host/
+echo "僅 iSCSI:"
+ls /sys/class/iscsi_host/ 2>/dev/null || echo "(無 iSCSI 活動)"
+
+# 用 strace 追蹤 rescan,看實際寫入哪些 scan 檔
+strace -f -e trace=openat 2>&1 \
+  perl -I/usr/share/perl5 \
+       -e 'use PVE::Storage::Custom::PureStorage::Multipath qw(rescan_scsi_hosts);
+           rescan_scsi_hosts(delay => 0)' \
+  | grep -oE "/sys/class/scsi_host/host[0-9]+/scan" \
+  | sort -u
+```
+
+**通過條件:** strace 輸出**只**能包含 `/sys/class/iscsi_host/` 內出現
+的 host 編號。若看到任何不在 iSCSI 清單中的 host (例如 `host0/scan`
+而 `host0` 是 SATA 控制器),代表修正失效,bug 已回退。
+
+**為什麼這很重要:** 對 HPE smartpqi / Dell PERC / LSI HBA 的非 iSCSI
+host scan 檔案寫入,會在 kernel 中造成 600+ 秒的 D-state 掛起。
+`sysfs_write_with_timeout` **無法**防範此問題 — D-state 子行程無法被
+SIGKILL 收回。唯一安全的防護是「一開始就不執行該操作」。
+
+---
+
 ## 快速 smoke test (5 分鐘,單節點)
 
 如果完整測試計畫太長,絕對最低限度的 smoke test 是:

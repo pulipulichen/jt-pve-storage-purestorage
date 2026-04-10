@@ -8,6 +8,111 @@ this project adheres to a `MAJOR.MINOR.PATCH-DEBIAN` versioning scheme.
 
 ---
 
+## [1.1.6] - 2026-04-10
+
+### postinst must reload ALL PVE services + LVM global_filter detection
+
+Two more issues from the related project jt-pve-storage-netapp's
+Incident 9 (pvestatd not reloaded) and Incident 10 (host LVM
+auto-activation on upgraded PVE nodes).
+
+#### Fixed
+- **[CRITICAL] postinst now reloads pvedaemon, pvestatd, AND pveproxy
+  after installation.** Previous versions did not reload any PVE service,
+  meaning old bug-containing code stayed in memory indefinitely. In
+  particular, pvestatd polls `status()` every 10 seconds — if the old
+  code triggers D-state children (e.g. the pre-1.1.5 SCSI host scan bug
+  on HPE hardware), D-state processes accumulate without limit until the
+  node's hardware watchdog or manual reboot intervenes.
+
+  Changed from `systemctl restart` to `systemctl reload` (SIGHUP). If
+  the old code already created D-state children, `restart`'s stop phase
+  hangs waiting for unkillable processes. `reload` sends SIGHUP, which
+  makes `PVE::Daemon` `re-exec()` itself with new code, bypassing the
+  stop phase entirely.
+- **[HIGH] postinst now checks `/etc/lvm/lvm.conf` for `global_filter`
+  and warns if absent.** On PVE nodes upgraded from 7/8 to 9, the old
+  `lvm.conf` lacks the filter that excludes device-mapper and multipath
+  devices from LVM scanning. The host LVM auto-activates VGs found
+  inside guest VM disks (which are raw LUNs visible as multipath
+  devices), creating holder `dm` devices on top of the multipath device.
+  These holders make `is_device_in_use()` correctly block
+  `free_image()` from deleting the volume, but the old error message
+  was not actionable.
+- **[HIGH] `free_image()` now provides detailed usage information when
+  `is_device_in_use()` blocks deletion.** New `get_device_usage_details()`
+  helper in `Multipath.pm` enumerates holder device names, dm-names,
+  detects LVM VG names from dm-name conventions, and explains the root
+  cause (host LVM auto-activation on upgraded PVE nodes) with exact
+  remediation: `vgchange -an <vg>` to deactivate immediately,
+  `global_filter` setting in `lvm.conf` for long-term fix.
+
+---
+
+## [1.1.5] - 2026-04-10
+
+### CRITICAL — `rescan_scsi_hosts()` could hang on HPE / Dell / Lenovo HBAs
+
+A latent bug present since 1.0.0 that would have surfaced on the first
+customer to deploy on HPE ProLiant, Dell PERC, Lenovo ThinkSystem, or
+any server with a SAS HBA / hardware RAID controller alongside the
+iSCSI cards. **All earlier versions are vulnerable. Strongly recommended
+upgrade.**
+
+#### Fixed
+- **[CRITICAL] `rescan_scsi_hosts()` iterated every entry in
+  `/sys/class/scsi_host/`, including non-iSCSI hosts.** Writing
+  `"- - -"` to the scan file of an HPE Smart Array controller (smartpqi
+  driver), Dell PERC (megaraid_sas), or LSI HBA (mpt3sas) triggers a
+  driver-side full target rescan that enters D-state for **600+ seconds**
+  inside the kernel. `sysfs_write_with_timeout()` protects the parent
+  process from blocking, but **D-state children cannot be reaped by
+  SIGKILL** and they hold kernel scan locks until the driver finishes,
+  causing cascading config-lock timeouts on every subsequent VM
+  operation, plus `pvedaemon` restart hangs requiring force-reboot.
+
+  Fixed by sourcing the host list from `/sys/class/iscsi_host/` instead
+  of `/sys/class/scsi_host/`. The `scsi_transport_iscsi` layer
+  registers every iSCSI host there via `iscsi_host_alloc()`, regardless
+  of underlying driver (`iscsi_tcp`, `iser`, `bnx2i`, `qla4xxx`, `qedi`,
+  `be2iscsi`, `cxgb3i`, `cxgb4i`, ...). Non-iSCSI drivers categorically
+  never register there, so iterating that class is both exhaustive and
+  safe.
+
+  Verified on a real host with mixed `scsi_host` (host0-3 non-iSCSI +
+  host4-7 iSCSI): `strace` confirms writes only happen on host4-7 after
+  the fix. Pre-fix the function would have written to every one of the
+  8 hosts.
+
+  **Lesson:** timeout protection covers the parent process, not the
+  kernel. For sysfs writes that hold kernel locks, the correct fix is
+  to NOT issue the operation in the first place, not to timeout it.
+- **[HIGH] `FC.pm rescan_fc_hosts()` used bare `open()`** to write
+  `/sys/class/fc_host/<host>/issue_lip` and
+  `/sys/class/scsi_host/<host>/scan`. The SCSI scan loop already
+  filtered to FC hosts only (via `get_fc_hosts()` — no Bug 1 risk
+  there), but the bare `open()` means the parent worker stalls if the
+  HBA is wedged. Fixed by routing both writes through
+  `sysfs_write_with_timeout()`, matching the protection already in
+  `Multipath.pm`.
+
+#### Added
+- **`translate_pure_error()` helper in `API.pm`** that converts Pure
+  FlashArray's raw API errors into operator-friendly messages.
+  Pre-1.1.5, an operator hitting the array's volume cap would see
+  `Maximum number of volumes is reached` with no guidance. Post-1.1.5,
+  they see a one-paragraph explanation: which limit was hit, why
+  destroyed-but-not-eradicated volumes count against it, and how to
+  recover. Pattern-matches Pure's known limit errors for: per-array
+  volume count, per-volume snapshot count, host connection count,
+  protection group count, capacity exhaustion, and API rate limit.
+  Unknown errors pass through unchanged.
+
+  Applied at the most user-visible die sites: `alloc_image()`,
+  `clone_image()`, `volume_snapshot()`.
+
+---
+
 ## [1.1.4] - 2026-04-09
 
 ### Six more bugs found by an internal deep audit after 1.1.3
