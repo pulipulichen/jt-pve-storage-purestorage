@@ -407,17 +407,32 @@ sub _cleanup_orphaned_devices {
     }
 
     # Phase 3: warn about Pure multipath devices not tracked and not on array.
+    # Use a per-WWID cooldown (flag file in /var/run/) to avoid flooding
+    # the journal every 10 seconds when pvestatd polls status(). Each WWID
+    # is warned about at most once per hour.
     my $local = eval { list_pure_multipath_devices(); } // [];
+    my $cooldown_dir = _wwid_lock_dir();
     for my $dev (@$local) {
         my $w = $dev->{wwid};
         next if $alive{$w};
         next if $tracked->{$w};
+
+        # Cooldown: skip if warned about this WWID within the last hour.
+        my $flag = "$cooldown_dir/orphan-warned-$w";
+        if (-f $flag) {
+            my $age = time() - (stat($flag))[9];
+            next if $age < 3600;  # 1 hour cooldown
+        }
+
         warn "orphan cleanup: untracked stale Pure multipath device /dev/mapper/$dev->{name} " .
              "(wwid $w) — not on array and not tracked. Possibly from a manually-attached LUN " .
              "or a previous plugin version. Manual cleanup recommended:\n" .
              "  multipathd disablequeueing map $dev->{name}\n" .
              "  dmsetup message $dev->{name} 0 fail_if_no_path\n" .
              "  multipath -f /dev/mapper/$dev->{name}\n";
+
+        # Touch the flag file for cooldown.
+        eval { open(my $fh, '>', $flag); close($fh); };
     }
 }
 

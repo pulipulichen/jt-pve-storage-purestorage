@@ -1,3 +1,41 @@
+jt-pve-storage-purestorage (1.1.7-1) stable; urgency=high
+
+  * [CRITICAL] is_device_in_use() treated ALL holders as "device in
+    use", including bare kpartx partition devices that the Linux kernel
+    creates automatically on any multipath LUN with a GPT/MBR partition
+    table (i.e. every single VM with an OS installed). This made it
+    impossible to delete any VM disk on Pure storage when the host
+    kernel had auto-scanned the LUN content. The fix distinguishes
+    bare kpartx partitions from real holders (LVM, dm-crypt, dm-raid,
+    bcache). A partition is SAFE to ignore if: its dm-name matches a
+    known kpartx pattern (<wwid>-part1, <wwid>p1, <wwid>1, mpath0-part1,
+    sdf1), it has NO sub-holders, it is NOT mounted (/proc/mounts),
+    and it is NOT used as swap (/proc/swaps). If ANY holder is NOT a
+    partition, or any partition has sub-holders/mount/swap, deletion is
+    still blocked (data-loss protection preserved).
+
+  * [HIGH] cleanup_lun_devices() now runs `kpartx -d <device>` before
+    attempting to remove the multipath map. Without this, partition
+    holder devices prevent `multipathd remove map` and `multipath -f`
+    from succeeding, because partition dm devices are holders of the
+    multipath map.
+
+  * [MEDIUM] get_device_usage_details() no longer misparses kpartx
+    partition dm-names as LVM VG names. The dm-name
+    `3624a9370...-part1` was being parsed as VG `3624a9370...` LV
+    `part1`. Partition patterns are now checked first and excluded from
+    VG name parsing.
+
+  * [LOW] Orphan warning cooldown: Phase 3 untracked-device warnings
+    in _cleanup_orphaned_devices now use a per-WWID flag file in
+    /var/run/pve-storage-purestorage/ (tmpfs, cleared on reboot) to
+    limit warnings to once per hour per WWID. Previously, pvestatd's
+    10-second status() polling would fire the same warning every 10
+    seconds, flooding the journal with identical messages for any
+    untracked Pure multipath device.
+
+ -- Jason Cheng (Jason Tools) <jason@jason.tools>  Fri, 11 Apr 2026 12:00:00 +0800
+
 jt-pve-storage-purestorage (1.1.6-1) stable; urgency=high
 
   * [CRITICAL] postinst now reloads ALL three PVE services that load

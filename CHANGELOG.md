@@ -8,6 +8,50 @@ this project adheres to a `MAJOR.MINOR.PATCH-DEBIAN` versioning scheme.
 
 ---
 
+## [1.1.7] - 2026-04-11
+
+### CRITICAL — kpartx partition holders blocked ALL volume deletions
+
+Every VM disk with an OS installed has a GPT/MBR partition table. The
+Linux kernel automatically scans multipath LUNs and creates partition
+dm devices via kpartx. These partition devices appear as "holders" in
+`/sys/block/<dm-N>/holders/`. The `is_device_in_use()` fix from 1.1.2
+treated ALL holders as "device in use" and blocked deletion -- correct
+for LVM holders (data loss prevention) but wrong for bare kpartx
+partitions (passive kernel artifacts with nothing using them). This
+made it impossible to delete any VM disk on Pure storage when the host
+kernel had auto-scanned the LUN content. **Not an edge case -- this is
+the normal case for every production VM.**
+
+#### Fixed
+- **[CRITICAL] `is_device_in_use()` now distinguishes bare kpartx
+  partitions from real holders.** For each holder:
+  - Check if dm-name matches a known kpartx pattern (`*-part1`, `*p1`,
+    `*1`, `sd*1`) or has the kernel `/sys/block/<h>/partition` flag
+  - If it IS a partition: check for sub-holders (LVM/dm-crypt on top),
+    check if mounted (`/proc/mounts`, both `/dev/dm-N` and
+    `/dev/mapper/<name>` paths), check if swapped (`/proc/swaps`)
+  - If ALL holders are bare partitions with no sub-holders and not
+    mounted/swapped: safe to ignore, allow deletion
+  - If ANY holder is not a partition, or any partition has
+    sub-holders/mount/swap: block (data-loss protection preserved)
+- **[HIGH] `cleanup_lun_devices()` now runs `kpartx -d <device>` before
+  attempting to remove the multipath map.** Without this, partition
+  holder devices prevent `multipathd remove map` and `multipath -f`
+  from succeeding.
+- **[MEDIUM] `get_device_usage_details()` no longer misparses kpartx
+  partition dm-names as LVM VG names.** The dm-name
+  `3624a9370...-part1` was being parsed as VG `3624a9370...` LV
+  `part1`. Partition patterns are now checked first and excluded from
+  VG name parsing.
+- **[LOW] Orphan warning cooldown.** Phase 3 untracked-device warnings
+  in `_cleanup_orphaned_devices` now use a per-WWID flag file in
+  `/var/run/pve-storage-purestorage/` to limit warnings to once per
+  hour per WWID. Previously, pvestatd's 10-second `status()` polling
+  would fire the same warning every 10 seconds.
+
+---
+
 ## [1.1.6] - 2026-04-10
 
 ### postinst must reload ALL PVE services + LVM global_filter detection
