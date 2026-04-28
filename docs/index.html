@@ -1,0 +1,1833 @@
+<!DOCTYPE html>
+<html lang="en" data-lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>jt-pve-storage-purestorage -- Pure Storage FlashArray Plugin for Proxmox VE</title>
+<meta name="description" content="Technical documentation for jt-pve-storage-purestorage: Pure Storage FlashArray iSCSI/FC storage plugin for Proxmox VE.">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<!-- ======== Top Nav ======== -->
+<header class="top-nav">
+    <div class="top-nav__brand">
+        <div class="top-nav__brand-icon">PS</div>
+        <span>
+            <span>jt-pve-storage-purestorage</span>
+        </span>
+    </div>
+    <div class="top-nav__actions">
+        <button class="lang-toggle" onclick="toggleLang()" title="Switch Language">
+            <span class="lang-en">繁體中文</span>
+            <span class="lang-zh">English</span>
+        </button>
+        <a href="https://github.com/jasoncheng7115/jt-pve-storage-purestorage" class="github-link" target="_blank" rel="noopener">
+            <svg width="18" height="18" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+            <span>GitHub</span>
+        </a>
+        <button class="hamburger" onclick="toggleSidebar()" aria-label="Menu">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12h18M3 6h18M3 18h18"/></svg>
+        </button>
+    </div>
+</header>
+
+<!-- ======== Sidebar ======== -->
+<div class="sidebar-overlay" onclick="toggleSidebar()"></div>
+<nav class="sidebar" id="sidebar">
+    <div class="sidebar__search">
+        <input type="text" class="sidebar__search-input" id="sidebarSearch" placeholder="Search..." oninput="filterSidebar(this.value)">
+    </div>
+    <div class="sidebar__section">
+        <div class="sidebar__heading">
+            <span class="lang-en">Getting Started</span>
+            <span class="lang-zh">快速開始</span>
+        </div>
+        <a href="#hero" class="sidebar__link">
+            <span class="lang-en">Overview</span>
+            <span class="lang-zh">概覽</span>
+        </a>
+        <a href="#disclaimer" class="sidebar__link">
+            <span class="lang-en">Disclaimer</span>
+            <span class="lang-zh">免責聲明</span>
+        </a>
+        <a href="#features" class="sidebar__link">
+            <span class="lang-en">Features</span>
+            <span class="lang-zh">功能特性</span>
+        </a>
+        <a href="#requirements" class="sidebar__link">
+            <span class="lang-en">Requirements</span>
+            <span class="lang-zh">系統需求</span>
+        </a>
+    </div>
+    <div class="sidebar__section">
+        <div class="sidebar__heading">
+            <span class="lang-en">Setup</span>
+            <span class="lang-zh">安裝設定</span>
+        </div>
+        <a href="#installation" class="sidebar__link">
+            <span class="lang-en">Installation</span>
+            <span class="lang-zh">安裝</span>
+        </a>
+        <a href="#quickstart" class="sidebar__link">
+            <span class="lang-en">Quick Start</span>
+            <span class="lang-zh">快速入門</span>
+        </a>
+        <a href="#configuration" class="sidebar__link">
+            <span class="lang-en">Configuration</span>
+            <span class="lang-zh">設定選項</span>
+        </a>
+    </div>
+    <div class="sidebar__section">
+        <div class="sidebar__heading">
+            <span class="lang-en">Architecture</span>
+            <span class="lang-zh">架構</span>
+        </div>
+        <a href="#architecture" class="sidebar__link">
+            <span class="lang-en">Architecture</span>
+            <span class="lang-zh">系統架構</span>
+        </a>
+        <a href="#multipath-safety" class="sidebar__link">
+            <span class="lang-en">Multipath Safety</span>
+            <span class="lang-zh">Multipath 安全規則</span>
+        </a>
+        <a href="#supported-features" class="sidebar__link">
+            <span class="lang-en">Supported Features</span>
+            <span class="lang-zh">功能支援表</span>
+        </a>
+    </div>
+    <div class="sidebar__section">
+        <div class="sidebar__heading">
+            <span class="lang-en">Reference</span>
+            <span class="lang-zh">參考資料</span>
+        </div>
+        <a href="#troubleshooting" class="sidebar__link">
+            <span class="lang-en">Troubleshooting</span>
+            <span class="lang-zh">疑難排解</span>
+        </a>
+        <a href="#changelog" class="sidebar__link">
+            <span class="lang-en">Changelog</span>
+            <span class="lang-zh">變更紀錄</span>
+        </a>
+        <a href="#acknowledgments" class="sidebar__link">
+            <span class="lang-en">Acknowledgments</span>
+            <span class="lang-zh">致謝</span>
+        </a>
+    </div>
+</nav>
+
+<!-- ======== Main Content ======== -->
+<main class="main-content">
+
+<!-- ---- Hero ---- -->
+<section class="hero" id="hero">
+    <div class="hero__grid-bg"></div>
+    <div class="hero__glow"></div>
+    <div class="hero__glow-left"></div>
+    <div class="hero__content">
+        <div class="hero__badge">v1.1.8 <span class="hero__badge-sep"></span> MIT License</div>
+        <h1 class="hero__title">jt-pve-storage-purestorage</h1>
+        <p class="hero__project-desc">
+            <span class="lang-en">Pure Storage FlashArray iSCSI/FC Storage Plugin for Proxmox VE</span>
+            <span class="lang-zh">Pure Storage FlashArray iSCSI/FC Proxmox VE 儲存外掛程式</span>
+        </p>
+        <p class="hero__subtitle">
+            <span class="lang-en">Enterprise SAN storage integration for Proxmox VE using the Pure Storage REST API (v1.x and v2.x). Supports iSCSI and Fibre Channel with multipath, snapshots, instant clones, ActiveCluster pods, live migration, and automatic device lifecycle management.</span>
+            <span class="lang-zh">透過 Pure Storage REST API（v1.x 與 v2.x）將企業級 SAN 儲存整合至 Proxmox VE。支援 iSCSI 及 Fibre Channel，具備 multipath、快照、即時複製、ActiveCluster Pod、即時遷移，以及自動裝置生命週期管理。</span>
+        </p>
+        <div class="hero__actions">
+            <a href="#installation" class="btn btn--primary">
+                <span class="lang-en">Install Guide</span>
+                <span class="lang-zh">安裝指南</span>
+            </a>
+            <a href="https://github.com/jasoncheng7115/jt-pve-storage-purestorage" class="btn btn--outline" target="_blank" rel="noopener">
+                <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+                GitHub
+            </a>
+        </div>
+    </div>
+</section>
+
+<div class="content-wrap">
+
+<!-- ---- Disclaimer ---- -->
+<section class="doc-section" id="disclaimer">
+    <h2 class="section-title">
+        <span class="lang-en">Disclaimer</span>
+        <span class="lang-zh">免責聲明</span>
+    </h2>
+    <div class="alert alert--danger">
+        <strong>
+            <span class="lang-en">WARNING: This is a third-party project. Use at your own risk.</span>
+            <span class="lang-zh">警告：此為第三方專案，使用風險自負。</span>
+        </strong>
+        <ul>
+            <li>
+                <span class="lang-en">This plugin is provided "AS IS" without warranty of any kind.</span>
+                <span class="lang-zh">本 plugin 以「現況」提供，不附帶任何形式的保證。</span>
+            </li>
+            <li>
+                <span class="lang-en">iSCSI protocol has been tested in real customer environments but not yet at large scale.</span>
+                <span class="lang-zh">iSCSI 協定已經過實際客戶環境測試，但尚未大規模驗證。</span>
+            </li>
+            <li>
+                <span class="lang-en">FC (Fibre Channel) protocol is implemented but has not been fully verified in production.</span>
+                <span class="lang-zh">FC (Fibre Channel) 協定已實作但尚未在正式環境完整驗證。</span>
+            </li>
+            <li>
+                <span class="lang-en">Always test thoroughly in a non-production environment before deployment.</span>
+                <span class="lang-zh">部署前請務必在非正式環境中徹底測試。</span>
+            </li>
+            <li>
+                <span class="lang-en">Back up your data regularly and have a recovery plan in place.</span>
+                <span class="lang-zh">請定期備份資料，並準備好復原計畫。</span>
+            </li>
+        </ul>
+    </div>
+</section>
+
+<!-- ---- Features ---- -->
+<section class="doc-section" id="features">
+    <h2 class="section-title">
+        <span class="lang-en">Features</span>
+        <span class="lang-zh">功能特性</span>
+    </h2>
+    <p class="section-subtitle">
+        <span class="lang-en">Direct integration with Pure Storage FlashArray, leveraging native array capabilities through the REST API.</span>
+        <span class="lang-zh">直接整合 Pure Storage FlashArray，透過 REST API 充分運用原生陣列功能。</span>
+    </p>
+    <div class="card-grid">
+        <div class="card">
+            <div class="card__icon"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6v12a2 2 0 002 2h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2z"/><path d="M4 12h16"/><path d="M12 4v16"/></svg></div>
+            <div class="card__title">
+                <span class="lang-en">1 VM Disk = 1 Pure Volume</span>
+                <span class="lang-zh">1 VM Disk = 1 Pure Volume</span>
+            </div>
+            <div class="card__desc">
+                <span class="lang-en">Direct mapping with no intermediate layer. Each disk is an independent Pure Storage volume.</span>
+                <span class="lang-zh">直接對應、無中間層。每個磁碟都是獨立的 Pure Storage volume。</span>
+            </div>
+        </div>
+        <div class="card">
+            <div class="card__icon"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M2 8V6a2 2 0 012-2h2"/><path d="M2 16v2a2 2 0 002 2h2"/><path d="M22 8V6a2 2 0 00-2-2h-2"/><path d="M22 16v2a2 2 0 01-2 2h-2"/><circle cx="12" cy="12" r="4"/></svg></div>
+            <div class="card__title">
+                <span class="lang-en">Snapshot Create/Delete/Rollback</span>
+                <span class="lang-zh">快照建立/刪除/倒回</span>
+            </div>
+            <div class="card__desc">
+                <span class="lang-en">Native Pure Storage snapshots. Instant, space-efficient, with host-side buffer flush for crash consistency.</span>
+                <span class="lang-zh">原生 Pure Storage 快照。即時、空間效率佳，並以 host 端 buffer flush 確保 crash 一致性。</span>
+            </div>
+        </div>
+        <div class="card">
+            <div class="card__icon"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M16 2H8a2 2 0 00-2 2v2h12V4a2 2 0 00-2-2z"/><path d="M4 8h16v12a2 2 0 01-2 2H6a2 2 0 01-2-2V8z"/><path d="M9 8v14"/></svg></div>
+            <div class="card__title">
+                <span class="lang-en">Template &amp; Linked Clone</span>
+                <span class="lang-zh">範本與 Linked Clone</span>
+            </div>
+            <div class="card__desc">
+                <span class="lang-en">Instant clones via Pure Storage volume copy-on-write. Zero data movement, immediately writable.</span>
+                <span class="lang-zh">透過 Pure Storage volume copy-on-write 即時複製。完全沒有資料搬移、立即可寫。</span>
+            </div>
+        </div>
+        <div class="card">
+            <div class="card__icon"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M8 2H6a2 2 0 00-2 2v12a2 2 0 002 2h8a2 2 0 002-2V8l-4-6H8z"/><path d="M12 2v6h4"/><path d="M14 22h4a2 2 0 002-2V10"/><path d="M18 14h-4"/></svg></div>
+            <div class="card__title">
+                <span class="lang-en">Full Clone from Snapshot</span>
+                <span class="lang-zh">從快照完整複製</span>
+            </div>
+            <div class="card__desc">
+                <span class="lang-en">Clone any VM from a specific snapshot to a fully independent VM, with automatic temp clone cleanup.</span>
+                <span class="lang-zh">從特定快照複製任何 VM 為完全獨立的 VM，含自動暫時 clone 清理。</span>
+            </div>
+        </div>
+        <div class="card">
+            <div class="card__icon"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><path d="M7 16l4-5 4 3 5-7"/></svg></div>
+            <div class="card__title">
+                <span class="lang-en">Real-time Capacity Reporting</span>
+                <span class="lang-zh">即時容量報告</span>
+            </div>
+            <div class="card__desc">
+                <span class="lang-en">Storage usage reported directly from Pure Storage REST API, including data reduction ratio.</span>
+                <span class="lang-zh">儲存使用量直接從 Pure Storage REST API 回報，含 data reduction 比率。</span>
+            </div>
+        </div>
+        <div class="card">
+            <div class="card__icon"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="12" r="2"/><circle cx="18" cy="6" r="2"/><circle cx="18" cy="18" r="2"/><path d="M8 11l8-4"/><path d="M8 13l8 4"/></svg></div>
+            <div class="card__title">
+                <span class="lang-en">Multipath I/O for HA</span>
+                <span class="lang-zh">Multipath I/O 高可用性</span>
+            </div>
+            <div class="card__desc">
+                <span class="lang-en">Automatic multipath configuration with Pure-friendly defaults: queue-length, ALUA, fast failover.</span>
+                <span class="lang-zh">自動 multipath 設定，採 Pure 推薦預設：queue-length、ALUA、快速容錯切換。</span>
+            </div>
+        </div>
+        <div class="card">
+            <div class="card__icon"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8l4 4-4 4"/><path d="M6 16l-4-4 4-4"/><path d="M22 12H2"/></svg></div>
+            <div class="card__title">
+                <span class="lang-en">Cluster-aware Live Migration</span>
+                <span class="lang-zh">叢集感知即時遷移</span>
+            </div>
+            <div class="card__desc">
+                <span class="lang-en">Volumes connected to all node hosts on the array for seamless live migration between Proxmox VE nodes.</span>
+                <span class="lang-zh">Volume 連接至陣列上所有節點 host，實現 Proxmox VE 節點間的無縫即時遷移。</span>
+            </div>
+        </div>
+        <div class="card">
+            <div class="card__icon"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1018 0 9 9 0 00-18 0z"/><path d="M3 12h18"/><path d="M12 3a14.4 14.4 0 010 18"/><path d="M12 3a14.4 14.4 0 000 18"/></svg></div>
+            <div class="card__title">
+                <span class="lang-en">ActiveCluster Pod Support</span>
+                <span class="lang-zh">ActiveCluster Pod 支援</span>
+            </div>
+            <div class="card__desc">
+                <span class="lang-en">Stretched-cluster volumes via Pure Storage ActiveCluster pods. Synchronous replication across two arrays.</span>
+                <span class="lang-zh">透過 Pure Storage ActiveCluster pod 提供延伸叢集 volume，跨兩座陣列同步複寫。</span>
+            </div>
+        </div>
+        <div class="card">
+            <div class="card__icon"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 12l10 5 10-5"/><path d="M2 17l10 5 10-5"/></svg></div>
+            <div class="card__title">
+                <span class="lang-en">Always-on Dedup &amp; Compression</span>
+                <span class="lang-zh">永遠啟用的去重與壓縮</span>
+            </div>
+            <div class="card__desc">
+                <span class="lang-en">Pure Storage applies inline data reduction transparently. No tuning required, no thin/thick choice.</span>
+                <span class="lang-zh">Pure Storage 自動套用 inline data reduction，無需調整，沒有 thin/thick 選擇。</span>
+            </div>
+        </div>
+        <div class="card">
+            <div class="card__icon"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="6" rx="1"/><rect x="2" y="14" width="20" height="6" rx="1"/><circle cx="6" cy="7" r="1" fill="currentColor"/><circle cx="6" cy="17" r="1" fill="currentColor"/></svg></div>
+            <div class="card__title">
+                <span class="lang-en">iSCSI and FC SAN Support</span>
+                <span class="lang-zh">iSCSI 及 FC SAN 支援</span>
+            </div>
+            <div class="card__desc">
+                <span class="lang-en">Choose transport protocol per storage. Both share the same multipath and WWID identification (Pure prefix <code>3624a9370</code>).</span>
+                <span class="lang-zh">可依儲存選擇傳輸協定。兩者共用相同的 multipath 與 WWID 識別（Pure 前綴 <code>3624a9370</code>）。</span>
+            </div>
+        </div>
+        <div class="card">
+            <div class="card__icon"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M4 8h16V6a2 2 0 00-2-2H6a2 2 0 00-2 2v2z"/><path d="M4 8v10a2 2 0 002 2h12a2 2 0 002-2V8"/><path d="M10 12h4"/></svg></div>
+            <div class="card__title">
+                <span class="lang-en">LXC Container Support</span>
+                <span class="lang-zh">LXC 容器支援</span>
+            </div>
+            <div class="card__desc">
+                <span class="lang-en">Container rootfs on Pure Storage volume. Configure with <code>--content images,rootdir</code>.</span>
+                <span class="lang-zh">容器 rootfs 可放在 Pure Storage volume 上。以 <code>--content images,rootdir</code> 設定。</span>
+            </div>
+        </div>
+        <div class="card">
+            <div class="card__icon"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="6" width="12" height="12" rx="2"/><path d="M6 10h12"/><path d="M10 6v12"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="M12 2v2"/><path d="M12 20v2"/></svg></div>
+            <div class="card__title">
+                <span class="lang-en">EFI, Cloud-init, TPM, vmstate</span>
+                <span class="lang-zh">EFI、Cloud-init、TPM、vmstate</span>
+            </div>
+            <div class="card__desc">
+                <span class="lang-en">Full support for EFI disk, Cloud-init ISO, TPM 2.0 state, and VM RAM snapshot (vmstate).</span>
+                <span class="lang-zh">完整支援 EFI 磁碟、Cloud-init ISO、TPM 2.0 state、以及 VM 記憶體快照 (vmstate)。</span>
+            </div>
+        </div>
+    </div>
+</section>
+
+<!-- ---- Requirements ---- -->
+<section class="doc-section" id="requirements">
+    <h2 class="section-title">
+        <span class="lang-en">Requirements</span>
+        <span class="lang-zh">系統需求</span>
+    </h2>
+
+    <h3 class="subsection-title">Proxmox VE</h3>
+    <div class="table-wrap">
+        <table>
+            <thead><tr><th>PVE Version</th><th>Storage API</th><th>
+                <span class="lang-en">Compatibility</span>
+                <span class="lang-zh">相容性</span>
+            </th></tr></thead>
+            <tbody>
+                <tr><td>PVE 9.1+</td><td>13</td><td><span class="status-badge status-badge--supported">
+                    <span class="lang-en">Supported</span>
+                    <span class="lang-zh">支援</span>
+                </span></td></tr>
+            </tbody>
+        </table>
+    </div>
+
+    <h3 class="subsection-title">Pure Storage FlashArray</h3>
+    <ul>
+        <li>
+            <span class="lang-en">Purity//FA 6.x or later (REST API 1.16+ or 2.0+ supported)</span>
+            <span class="lang-zh">Purity//FA 6.x 或更新版本（支援 REST API 1.16+ 或 2.0+）</span>
+        </li>
+        <li>
+            <span class="lang-en">REST API enabled (default on FlashArray)</span>
+            <span class="lang-zh">已啟用 REST API（FlashArray 預設啟用）</span>
+        </li>
+        <li>
+            <span class="lang-en">Network connectivity from Proxmox VE management network to the array management IP (HTTPS/443)</span>
+            <span class="lang-zh">Proxmox VE 管理網路可連線至陣列管理 IP（HTTPS/443）</span>
+        </li>
+        <li>
+            <span class="lang-en">iSCSI or FC ports configured and reachable from PVE nodes</span>
+            <span class="lang-zh">已設定 iSCSI 或 FC port，且 PVE 節點可連線</span>
+        </li>
+        <li>
+            <span class="lang-en">User account with API token, or username + password with permissions for volume, host, snapshot, and pod operations</span>
+            <span class="lang-zh">有 API token 或 帳號密碼的使用者，需有 volume、host、snapshot、pod 操作權限</span>
+        </li>
+        <li>
+            <span class="lang-en">For ActiveCluster: a configured pod with the source array as a member</span>
+            <span class="lang-zh">使用 ActiveCluster 時：已設定的 pod，且來源陣列為成員</span>
+        </li>
+    </ul>
+
+    <h3 class="subsection-title">
+        <span class="lang-en">Proxmox VE Node Dependencies</span>
+        <span class="lang-zh">Proxmox VE 節點相依套件</span>
+    </h3>
+    <div class="table-wrap">
+        <table>
+            <thead><tr>
+                <th>
+                    <span class="lang-en">Package</span>
+                    <span class="lang-zh">套件</span>
+                </th>
+                <th>
+                    <span class="lang-en">Purpose</span>
+                    <span class="lang-zh">用途</span>
+                </th>
+                <th>
+                    <span class="lang-en">Required</span>
+                    <span class="lang-zh">必要</span>
+                </th>
+            </tr></thead>
+            <tbody>
+                <tr><td><code>open-iscsi</code></td><td>
+                    <span class="lang-en">iSCSI initiator (iscsiadm)</span>
+                    <span class="lang-zh">iSCSI initiator (iscsiadm)</span>
+                </td><td>
+                    <span class="lang-en">Yes (for iSCSI)</span>
+                    <span class="lang-zh">是（iSCSI 模式）</span>
+                </td></tr>
+                <tr><td><code>multipath-tools</code></td><td>
+                    <span class="lang-en">Multipath I/O daemon (multipathd)</span>
+                    <span class="lang-zh">Multipath I/O 背景服務 (multipathd)</span>
+                </td><td>
+                    <span class="lang-en">Yes</span>
+                    <span class="lang-zh">是</span>
+                </td></tr>
+                <tr><td><code>sg3-utils</code></td><td>
+                    <span class="lang-en">SCSI utilities (sg_inq)</span>
+                    <span class="lang-zh">SCSI 工具 (sg_inq)</span>
+                </td><td>
+                    <span class="lang-en">Yes</span>
+                    <span class="lang-zh">是</span>
+                </td></tr>
+                <tr><td><code>psmisc</code></td><td>
+                    <span class="lang-en">Process utilities (fuser) for device-in-use detection</span>
+                    <span class="lang-zh">行程工具 (fuser)，偵測裝置使用中</span>
+                </td><td>
+                    <span class="lang-en">Yes</span>
+                    <span class="lang-zh">是</span>
+                </td></tr>
+                <tr><td><code>libwww-perl</code></td><td>
+                    <span class="lang-en">HTTP client for REST API</span>
+                    <span class="lang-zh">HTTP 客戶端，供 REST API 使用</span>
+                </td><td>
+                    <span class="lang-en">Yes</span>
+                    <span class="lang-zh">是</span>
+                </td></tr>
+                <tr><td><code>libjson-perl</code></td><td>
+                    <span class="lang-en">JSON encoding/decoding</span>
+                    <span class="lang-zh">JSON 編碼/解碼</span>
+                </td><td>
+                    <span class="lang-en">Yes</span>
+                    <span class="lang-zh">是</span>
+                </td></tr>
+                <tr><td><code>liburi-perl</code></td><td>
+                    <span class="lang-en">URI handling</span>
+                    <span class="lang-zh">URI 處理</span>
+                </td><td>
+                    <span class="lang-en">Yes</span>
+                    <span class="lang-zh">是</span>
+                </td></tr>
+                <tr><td><code>lsscsi</code></td><td>
+                    <span class="lang-en">List SCSI devices (troubleshooting)</span>
+                    <span class="lang-zh">列出 SCSI 裝置（疑難排解用）</span>
+                </td><td>
+                    <span class="lang-en">Recommended</span>
+                    <span class="lang-zh">建議</span>
+                </td></tr>
+            </tbody>
+        </table>
+    </div>
+</section>
+
+<!-- ---- Installation ---- -->
+<section class="doc-section" id="installation">
+    <h2 class="section-title">
+        <span class="lang-en">Installation</span>
+        <span class="lang-zh">安裝</span>
+    </h2>
+
+    <h3 class="subsection-title">
+        <span class="lang-en">First-Time Installation</span>
+        <span class="lang-zh">首次安裝</span>
+    </h3>
+    <div class="alert alert--info">
+        <span class="lang-en"><strong>Important:</strong> Install dependencies BEFORE installing the plugin package to avoid dependency resolution issues.</span>
+        <span class="lang-zh"><strong>重要：</strong>請在安裝 plugin 套件前先安裝相依套件，以避免相依性解析問題。</span>
+    </div>
+
+    <div class="step">
+        <div class="step__number">1</div>
+        <div class="step__content">
+            <div class="step__title">
+                <span class="lang-en">Update apt cache</span>
+                <span class="lang-zh">更新 apt 快取</span>
+            </div>
+            <pre><span class="cmd">apt</span> update</pre>
+        </div>
+    </div>
+    <div class="step">
+        <div class="step__number">2</div>
+        <div class="step__content">
+            <div class="step__title">
+                <span class="lang-en">Install ALL dependencies</span>
+                <span class="lang-zh">安裝所有相依套件</span>
+            </div>
+            <pre><span class="cmd">apt</span> install <span class="flag">-y</span> open-iscsi multipath-tools sg3-utils psmisc \
+    libwww-perl libjson-perl liburi-perl lsscsi</pre>
+        </div>
+    </div>
+    <div class="step">
+        <div class="step__number">3</div>
+        <div class="step__content">
+            <div class="step__title">
+                <span class="lang-en">Enable required services</span>
+                <span class="lang-zh">啟用必要服務</span>
+            </div>
+            <pre><span class="cmd">systemctl</span> enable <span class="flag">--now</span> iscsid
+<span class="cmd">systemctl</span> enable <span class="flag">--now</span> multipathd</pre>
+        </div>
+    </div>
+    <div class="step">
+        <div class="step__number">4</div>
+        <div class="step__content">
+            <div class="step__title">
+                <span class="lang-en">Install the plugin package</span>
+                <span class="lang-zh">安裝 plugin 套件</span>
+            </div>
+            <pre><span class="cmd">dpkg</span> <span class="flag">-i</span> jt-pve-storage-purestorage_1.1.8-1_all.deb</pre>
+            <p>
+                <span class="lang-en">The plugin automatically writes <code>/etc/multipath/conf.d/pure-storage.conf</code> with Pure-recommended settings, detects dangerous existing multipath.conf settings, and reloads Proxmox VE services (pvedaemon, pvestatd, pveproxy) via SIGHUP.</span>
+                <span class="lang-zh">Plugin 會自動寫入 <code>/etc/multipath/conf.d/pure-storage.conf</code>（採 Pure 推薦設定）、偵測 multipath.conf 危險設定，並透過 SIGHUP 重新載入 Proxmox VE 服務（pvedaemon、pvestatd、pveproxy）。</span>
+            </p>
+        </div>
+    </div>
+
+    <h3 class="subsection-title">
+        <span class="lang-en">Fix Broken State</span>
+        <span class="lang-zh">修復安裝失敗狀態</span>
+    </h3>
+    <p>
+        <span class="lang-en">If you ran <code>dpkg -i</code> before installing dependencies and got errors:</span>
+        <span class="lang-zh">如果在安裝相依套件前就執行 <code>dpkg -i</code> 而出現錯誤：</span>
+    </p>
+    <pre><span class="cmd">apt</span> update
+<span class="cmd">apt</span> <span class="flag">--fix-broken</span> install <span class="flag">-y</span>
+<span class="cmd">dpkg</span> <span class="flag">-l</span> | <span class="cmd">grep</span> jt-pve-storage-purestorage</pre>
+
+    <h3 class="subsection-title">
+        <span class="lang-en">Cluster Installation</span>
+        <span class="lang-zh">叢集安裝</span>
+    </h3>
+    <div class="alert alert--danger">
+        <span class="lang-en"><strong>CRITICAL:</strong> In a Proxmox VE cluster, this plugin MUST be installed on ALL nodes. Nodes without the plugin will show <code>Parameter verification failed. (400)</code>.</span>
+        <span class="lang-zh"><strong>重要：</strong>在 Proxmox VE 叢集中，此 plugin 必須在所有節點上安裝。未安裝的節點會顯示 <code>Parameter verification failed. (400)</code>。</span>
+    </div>
+    <p>
+        <span class="lang-en">Repeat the 4 steps above on EACH node. Install the plugin on ALL nodes first, then add the storage configuration (only once, on any node).</span>
+        <span class="lang-zh">在每個節點上重複上述 4 個步驟。先在所有節點安裝 plugin，再新增儲存設定（只需在任一節點操作一次）。</span>
+    </p>
+
+    <h3 class="subsection-title">
+        <span class="lang-en">Upgrade SOP</span>
+        <span class="lang-zh">升級標準作業程序</span>
+    </h3>
+    <p>
+        <span class="lang-en">When upgrading, follow these steps on every cluster node in sequence (one node at a time):</span>
+        <span class="lang-zh">升級時，請依序在每個叢集節點上執行以下步驟（一次一個節點）：</span>
+    </p>
+    <div class="alert alert--warning">
+        <span class="lang-en"><strong>Pre-1.1.1 to 1.1.x note:</strong> If you are upgrading from a 1.0.x or pre-1.1.1 release, your <code>/etc/multipath/conf.d/pure-storage.conf</code> does NOT carry a version marker and will NOT be auto-upgraded. You must align it manually with the new device block (or delete it so the next <code>pvesm status</code> recreates it). See the README "READ FIRST" section.</span>
+        <span class="lang-zh"><strong>從 1.1.1 之前升級的注意事項：</strong>從 1.0.x 或 1.1.1 之前版本升級時，您的 <code>/etc/multipath/conf.d/pure-storage.conf</code> 沒有版本標記、不會自動升級。請手動對齊新的 device block，或刪除該檔讓下次 <code>pvesm status</code> 重新建立。詳見 README「READ FIRST」段落。</span>
+    </div>
+    <div class="step">
+        <div class="step__number">1</div>
+        <div class="step__content">
+            <div class="step__title">
+                <span class="lang-en">Pre-upgrade backup</span>
+                <span class="lang-zh">升級前備份</span>
+            </div>
+            <pre><span class="comment"># Backup multipath configs</span>
+<span class="cmd">cp</span> /etc/multipath.conf /etc/multipath.conf.bak.$(<span class="cmd">date</span> +%Y%m%d-%H%M%S)
+<span class="cmd">cp</span> /etc/multipath/conf.d/pure-storage.conf \
+    /etc/multipath/conf.d/pure-storage.conf.bak.$(<span class="cmd">date</span> +%Y%m%d-%H%M%S) 2&gt;/dev/null
+<span class="comment"># Note current version</span>
+<span class="cmd">dpkg</span> <span class="flag">-l</span> jt-pve-storage-purestorage | <span class="cmd">tail</span> <span class="flag">-1</span></pre>
+        </div>
+    </div>
+    <div class="step">
+        <div class="step__number">2</div>
+        <div class="step__content">
+            <div class="step__title">
+                <span class="lang-en">Stop or migrate VMs (recommended)</span>
+                <span class="lang-zh">停止或遷移 VM（建議）</span>
+            </div>
+            <p>
+                <span class="lang-en">For safest upgrade, migrate or stop VMs that have disks on this storage. Live VMs will continue to work during upgrade, but a clean state simplifies recovery if anything goes wrong.</span>
+                <span class="lang-zh">最安全的做法是先將使用此儲存的 VM 遷移或停止。升級期間執行中的 VM 仍可繼續運作，但乾淨的狀態有助於出問題時的復原。</span>
+            </p>
+        </div>
+    </div>
+    <div class="step">
+        <div class="step__number">3</div>
+        <div class="step__content">
+            <div class="step__title">
+                <span class="lang-en">Install new package</span>
+                <span class="lang-zh">安裝新套件</span>
+            </div>
+            <pre><span class="cmd">dpkg</span> <span class="flag">-i</span> jt-pve-storage-purestorage_1.1.8-1_all.deb</pre>
+        </div>
+    </div>
+    <div class="step">
+        <div class="step__number">4</div>
+        <div class="step__content">
+            <div class="step__title">
+                <span class="lang-en">Review postinst warnings and verify</span>
+                <span class="lang-zh">檢視 postinst 警告並驗證</span>
+            </div>
+            <pre><span class="comment"># If postinst warned about dangerous multipath.conf settings, edit:</span>
+<span class="cmd">nano</span> /etc/multipath.conf
+<span class="comment"># Apply: no_path_retry queue -&gt; 30, remove queue_if_no_path, dev_loss_tmo infinity -&gt; 60</span>
+<span class="cmd">systemctl</span> restart multipathd  <span class="comment"># restart, NOT reload</span>
+
+<span class="comment"># Verify</span>
+<span class="cmd">dpkg</span> <span class="flag">-l</span> jt-pve-storage-purestorage | <span class="cmd">grep</span> ii
+<span class="cmd">pvesm</span> status | <span class="cmd">grep</span> purestorage
+<span class="cmd">multipath</span> <span class="flag">-ll</span></pre>
+        </div>
+    </div>
+    <div class="step">
+        <div class="step__number">5</div>
+        <div class="step__content">
+            <div class="step__title">
+                <span class="lang-en">Repeat on next node</span>
+                <span class="lang-zh">在下一個節點重複</span>
+            </div>
+            <p>
+                <span class="lang-en">Move to the next cluster node and repeat from Step 1. Do not upgrade multiple nodes simultaneously.</span>
+                <span class="lang-zh">移至下一個叢集節點，從步驟 1 重複。請勿同時升級多個節點。</span>
+            </p>
+        </div>
+    </div>
+</section>
+
+<!-- ---- Quick Start ---- -->
+<section class="doc-section" id="quickstart">
+    <h2 class="section-title">
+        <span class="lang-en">Quick Start</span>
+        <span class="lang-zh">快速入門</span>
+    </h2>
+
+    <h3 class="subsection-title">
+        <span class="lang-en">Add Storage (iSCSI, API token)</span>
+        <span class="lang-zh">新增儲存（iSCSI、API token）</span>
+    </h3>
+    <pre><span class="cmd">pvesm</span> add purestorage pure1 \
+    <span class="flag">--pure-portal</span> <span class="string">192.168.1.100</span> \
+    <span class="flag">--pure-api-token</span> <span class="string">'xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx'</span> \
+    <span class="flag">--pure-protocol</span> iscsi \
+    <span class="flag">--content</span> images,rootdir \
+    <span class="flag">--shared</span> 1</pre>
+
+    <h3 class="subsection-title">
+        <span class="lang-en">Add Storage (FC / Fibre Channel)</span>
+        <span class="lang-zh">新增儲存（FC / Fibre Channel）</span>
+    </h3>
+    <pre><span class="cmd">pvesm</span> add purestorage pure-fc \
+    <span class="flag">--pure-portal</span> <span class="string">192.168.1.100</span> \
+    <span class="flag">--pure-api-token</span> <span class="string">'xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx'</span> \
+    <span class="flag">--pure-protocol</span> fc \
+    <span class="flag">--content</span> images \
+    <span class="flag">--shared</span> 1</pre>
+
+    <h3 class="subsection-title">
+        <span class="lang-en">Add Storage (ActiveCluster Pod)</span>
+        <span class="lang-zh">新增儲存（ActiveCluster Pod）</span>
+    </h3>
+    <pre><span class="cmd">pvesm</span> add purestorage pure-stretched \
+    <span class="flag">--pure-portal</span> <span class="string">192.168.1.100</span> \
+    <span class="flag">--pure-api-token</span> <span class="string">'xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx'</span> \
+    <span class="flag">--pure-protocol</span> iscsi \
+    <span class="flag">--pure-pod</span> <span class="string">prod-pod</span> \
+    <span class="flag">--content</span> images,rootdir \
+    <span class="flag">--shared</span> 1</pre>
+
+    <h3 class="subsection-title">
+        <span class="lang-en">Verify</span>
+        <span class="lang-zh">驗證</span>
+    </h3>
+    <pre><span class="cmd">pvesm</span> status
+<span class="output"># Name      Type         Status  Total   Used  Available
+# pure1     purestorage  active  ...     ...   ...</span></pre>
+
+    <div class="alert alert--info">
+        <span class="lang-en"><strong>Note:</strong> This is a custom/third-party storage plugin. It is NOT listed in the Web UI "Add Storage" dropdown -- storage must be added via CLI (<code>pvesm add</code>). After adding, the storage will appear in the Web UI storage list and support all VM operations normally.</span>
+        <span class="lang-zh"><strong>注意：</strong>這是第三方自訂儲存 plugin，不會出現在 Web UI 的「新增儲存」下拉選單中 -- 必須透過 CLI (<code>pvesm add</code>) 新增。新增後，儲存會出現在 Web UI 的儲存清單中，並正常支援所有 VM 操作。</span>
+    </div>
+</section>
+
+<!-- ---- Configuration ---- -->
+<section class="doc-section" id="configuration">
+    <h2 class="section-title">
+        <span class="lang-en">Configuration Reference</span>
+        <span class="lang-zh">設定選項參考</span>
+    </h2>
+
+    <h3 class="subsection-title">
+        <span class="lang-en">Required Options</span>
+        <span class="lang-zh">必要選項</span>
+    </h3>
+    <div class="table-wrap">
+        <table>
+            <thead><tr>
+                <th>
+                    <span class="lang-en">Option</span>
+                    <span class="lang-zh">選項</span>
+                </th>
+                <th>
+                    <span class="lang-en">Description</span>
+                    <span class="lang-zh">說明</span>
+                </th>
+                <th>
+                    <span class="lang-en">Example</span>
+                    <span class="lang-zh">範例</span>
+                </th>
+            </tr></thead>
+            <tbody>
+                <tr><td><code>pure-portal</code></td><td>
+                    <span class="lang-en">Pure Storage array management IP or hostname</span>
+                    <span class="lang-zh">Pure Storage 陣列管理 IP 或主機名稱</span>
+                </td><td><code>192.168.1.100</code></td></tr>
+                <tr><td><code>pure-api-token</code><br><span class="lang-en">OR</span><span class="lang-zh">或</span></td><td>
+                    <span class="lang-en">API token (preferred). One of token or username/password is required.</span>
+                    <span class="lang-zh">API token（建議優先使用）。token 或 帳密擇一即可。</span>
+                </td><td><code>xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx</code></td></tr>
+                <tr><td><code>pure-username</code> +<br><code>pure-password</code></td><td>
+                    <span class="lang-en">Username and password (alternative to API token)</span>
+                    <span class="lang-zh">帳號密碼（API token 的替代方案）</span>
+                </td><td><code>pureuser</code> / <code>secret</code></td></tr>
+            </tbody>
+        </table>
+    </div>
+
+    <h3 class="subsection-title">
+        <span class="lang-en">Optional Options</span>
+        <span class="lang-zh">可選選項</span>
+    </h3>
+    <div class="table-wrap">
+        <table>
+            <thead><tr>
+                <th>
+                    <span class="lang-en">Option</span>
+                    <span class="lang-zh">選項</span>
+                </th>
+                <th>
+                    <span class="lang-en">Default</span>
+                    <span class="lang-zh">預設值</span>
+                </th>
+                <th>
+                    <span class="lang-en">Description</span>
+                    <span class="lang-zh">說明</span>
+                </th>
+            </tr></thead>
+            <tbody>
+                <tr><td><code>pure-protocol</code></td><td><code>iscsi</code></td><td>
+                    <span class="lang-en">SAN protocol: <code>iscsi</code> or <code>fc</code> (Fibre Channel)</span>
+                    <span class="lang-zh">SAN 協定：<code>iscsi</code> 或 <code>fc</code> (Fibre Channel)</span>
+                </td></tr>
+                <tr><td><code>pure-ssl-verify</code></td><td><code>0</code></td><td>
+                    <span class="lang-en">Verify SSL certificates (0 = disable for self-signed)</span>
+                    <span class="lang-zh">驗證 SSL 憑證（0 = 停用，適用自簽憑證）</span>
+                </td></tr>
+                <tr><td><code>pure-host-mode</code></td><td><code>per-node</code></td><td>
+                    <span class="lang-en">Host mode: <code>per-node</code> (recommended) or <code>shared</code></span>
+                    <span class="lang-zh">Host 模式：<code>per-node</code>（建議）或 <code>shared</code></span>
+                </td></tr>
+                <tr><td><code>pure-cluster-name</code></td><td><code>pve</code></td><td>
+                    <span class="lang-en">Cluster name for host naming. Use different values for multiple storages on the same array.</span>
+                    <span class="lang-zh">Host 命名用的叢集名稱。同一陣列上有多個儲存時請使用不同值。</span>
+                </td></tr>
+                <tr><td><code>pure-pod</code></td><td>
+                    <span class="lang-en">(none)</span>
+                    <span class="lang-zh">（無）</span>
+                </td><td>
+                    <span class="lang-en">ActiveCluster pod name. Volumes will be created inside this pod for synchronous replication.</span>
+                    <span class="lang-zh">ActiveCluster pod 名稱。Volume 會建立在此 pod 內，提供同步複寫。</span>
+                </td></tr>
+                <tr><td><code>pure-device-timeout</code></td><td><code>60</code></td><td>
+                    <span class="lang-en">Device discovery timeout in seconds</span>
+                    <span class="lang-zh">裝置探索逾時秒數</span>
+                </td></tr>
+            </tbody>
+        </table>
+    </div>
+
+    <h3 class="subsection-title">
+        <span class="lang-en">Proxmox VE Standard Storage Options</span>
+        <span class="lang-zh">Proxmox VE 標準儲存選項</span>
+    </h3>
+    <p>
+        <span class="lang-en">These are standard Proxmox VE storage options that apply to all storage types, including this plugin.</span>
+        <span class="lang-zh">這些是 Proxmox VE 標準儲存選項，適用於所有儲存類型，包含本外掛程式。</span>
+    </p>
+    <div class="table-wrap">
+        <table>
+            <thead><tr>
+                <th>
+                    <span class="lang-en">Option</span>
+                    <span class="lang-zh">選項</span>
+                </th>
+                <th>
+                    <span class="lang-en">Default</span>
+                    <span class="lang-zh">預設值</span>
+                </th>
+                <th>
+                    <span class="lang-en">Description</span>
+                    <span class="lang-zh">說明</span>
+                </th>
+            </tr></thead>
+            <tbody>
+                <tr><td><code>content</code></td><td><code>images</code></td><td>
+                    <span class="lang-en">Content types this storage can hold. Use <code>images</code> for VM disks only, or <code>images,rootdir</code> to also support LXC containers.</span>
+                    <span class="lang-zh">此儲存可存放的內容類型。使用 <code>images</code> 僅支援 VM 磁碟，或使用 <code>images,rootdir</code> 同時支援 LXC 容器。</span>
+                </td></tr>
+                <tr><td><code>shared</code></td><td><code>0</code></td><td>
+                    <span class="lang-en">Mark storage as shared across cluster nodes. <strong>Must set to <code>1</code></strong> for this plugin -- required for live migration.</span>
+                    <span class="lang-zh">標記儲存為叢集節點間共享。本外掛<strong>必須設為 <code>1</code></strong> -- 即時遷移所需。</span>
+                </td></tr>
+                <tr><td><code>nodes</code></td><td>
+                    <span class="lang-en">(all)</span>
+                    <span class="lang-zh">（全部）</span>
+                </td><td>
+                    <span class="lang-en">Restrict storage to specific nodes. Comma-separated list. Example: <code>--nodes pve1,pve2,pve3</code>.</span>
+                    <span class="lang-zh">限制儲存僅供特定節點使用。逗號分隔。範例：<code>--nodes pve1,pve2,pve3</code>。</span>
+                </td></tr>
+                <tr><td><code>disable</code></td><td><code>0</code></td><td>
+                    <span class="lang-en">Disable this storage. Set to <code>1</code> to temporarily deactivate without removing the configuration.</span>
+                    <span class="lang-zh">停用此儲存。設為 <code>1</code> 可暫時停用而不刪除設定。</span>
+                </td></tr>
+            </tbody>
+        </table>
+    </div>
+
+    <h3 class="subsection-title">
+        <span class="lang-en">Example storage.cfg (iSCSI, API token)</span>
+        <span class="lang-zh">範例 storage.cfg (iSCSI、API token)</span>
+    </h3>
+    <div class="config-block">purestorage: pure1
+    pure-portal 192.168.1.100
+    pure-api-token xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+    pure-protocol iscsi
+    pure-host-mode per-node
+    pure-cluster-name pve
+    content images,rootdir
+    shared 1</div>
+
+    <h3 class="subsection-title">
+        <span class="lang-en">Example storage.cfg (FC SAN)</span>
+        <span class="lang-zh">範例 storage.cfg (FC SAN)</span>
+    </h3>
+    <div class="config-block">purestorage: pure-fc
+    pure-portal 192.168.1.100
+    pure-api-token xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+    pure-protocol fc
+    pure-host-mode per-node
+    pure-cluster-name pve
+    content images,rootdir
+    shared 1</div>
+
+    <h3 class="subsection-title">
+        <span class="lang-en">Example storage.cfg (ActiveCluster Pod)</span>
+        <span class="lang-zh">範例 storage.cfg (ActiveCluster Pod)</span>
+    </h3>
+    <div class="config-block">purestorage: pure-stretched
+    pure-portal 192.168.1.100
+    pure-api-token xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+    pure-protocol iscsi
+    pure-pod prod-pod
+    pure-host-mode per-node
+    content images,rootdir
+    shared 1</div>
+
+    <div class="alert alert--info">
+        <span class="lang-en"><strong>Note:</strong> For FC, <code>pure-portal</code> is still required for Pure REST API access. The FC data path uses the FC fabric, not the management IP.</span>
+        <span class="lang-zh"><strong>注意：</strong>FC 模式下仍需 <code>pure-portal</code> 用於 Pure REST API 存取。FC 資料路徑使用 FC fabric，不是管理 IP。</span>
+    </div>
+</section>
+
+<!-- ---- Architecture ---- -->
+<section class="doc-section" id="architecture">
+    <h2 class="section-title">
+        <span class="lang-en">Architecture</span>
+        <span class="lang-zh">系統架構</span>
+    </h2>
+
+    <h3 class="subsection-title">
+        <span class="lang-en">1:1 Architecture Model</span>
+        <span class="lang-zh">1:1 架構模型</span>
+    </h3>
+    <p>
+        <span class="lang-en">Each VM disk maps directly to one Pure Storage volume. No intermediate FlexVol-style container -- the volume IS the disk. This makes snapshot, clone, and rollback semantics match the Proxmox VE model exactly.</span>
+        <span class="lang-zh">每個 VM 磁碟直接對應一個 Pure Storage volume。沒有 FlexVol 那種中間容器層 -- volume 即磁碟。快照、複製、倒回語意完全匹配 Proxmox VE 模型。</span>
+    </p>
+    <div class="ascii-diagram">Proxmox VE Cluster                    Pure Storage FlashArray
++------------------+                  +-------------------+
+|   PVE Node 1     |                  |   FlashArray      |
+|   +----------+   |    iSCSI/FC      |   +-------------+ |
+|   | VM 100   |&lt;--+-----------------&gt;|   | Volume      | |
+|   | scsi0    |   |   multipath      |   | pve-...-100 | |
+|   +----------+   |                  |   |  -disk0     | |
++------------------+                  |   +-------------+ |
+        |                             |                   |
+        | live migration              |   Hosts:          |
+        v                             |   - pve-pve-pve1  |
++------------------+                  |   - pve-pve-pve2  |
+|   PVE Node 2     |                  |                   |
+|   +----------+   |    iSCSI/FC      |   (Optional)      |
+|   | VM 100   |&lt;--+-----------------&gt;|   Pod: prod-pod   |
+|   | scsi0    |   |   multipath      |   for stretched   |
+|   +----------+   |                  |   ActiveCluster   |
++------------------+                  +-------------------+</div>
+
+    <h3 class="subsection-title">
+        <span class="lang-en">Object Mapping</span>
+        <span class="lang-zh">物件對應</span>
+    </h3>
+    <div class="table-wrap">
+        <table>
+            <thead><tr>
+                <th>
+                    <span class="lang-en">Proxmox VE Object</span>
+                    <span class="lang-zh">Proxmox VE 物件</span>
+                </th>
+                <th>
+                    <span class="lang-en">Pure Storage Object</span>
+                    <span class="lang-zh">Pure Storage 物件</span>
+                </th>
+                <th>
+                    <span class="lang-en">Naming Pattern</span>
+                    <span class="lang-zh">命名規則</span>
+                </th>
+            </tr></thead>
+            <tbody>
+                <tr><td>Storage</td><td>--</td><td>
+                    <span class="lang-en">User defined (e.g., <code>pure1</code>)</span>
+                    <span class="lang-zh">使用者定義（例如 <code>pure1</code>）</span>
+                </td></tr>
+                <tr><td>VM Disk</td><td>Volume</td><td><code>pve-{storage}-{vmid}-disk{id}</code></td></tr>
+                <tr><td>Snapshot</td><td>Volume Snapshot</td><td><code>{volume}.pve-snap-{snapname}</code></td></tr>
+                <tr><td>Proxmox VE Node</td><td>Host</td><td><code>pve-{cluster}-{node}</code></td></tr>
+                <tr><td>Cloud-init</td><td>Volume</td><td><code>pve-{storage}-{vmid}-cloudinit</code></td></tr>
+                <tr><td>VM Config Backup</td><td>Volume (1MB ext4)</td><td><code>pve-{storage}-{vmid}-vmconf-{snapname}</code></td></tr>
+                <tr><td>Stretched Volume</td><td>Pod-prefixed Volume</td><td><code>{pod}::{volume}</code></td></tr>
+            </tbody>
+        </table>
+    </div>
+
+    <h3 class="subsection-title">
+        <span class="lang-en">Module Architecture</span>
+        <span class="lang-zh">模組架構</span>
+    </h3>
+    <div class="module-list">
+        <div class="module-item">
+            <div class="module-item__name">PureStoragePlugin.pm</div>
+            <div class="module-item__desc">
+                <span class="lang-en">Main plugin -- Proxmox VE Storage Plugin API implementation. Volumes, snapshots, clones, WWID tracking, cluster orphan cleanup.</span>
+                <span class="lang-zh">主 plugin -- Proxmox VE Storage Plugin API 實作。Volume、快照、複製、WWID 追蹤、叢集殘留清理。</span>
+            </div>
+        </div>
+        <div class="module-item">
+            <div class="module-item__name">API.pm</div>
+            <div class="module-item__desc">
+                <span class="lang-en">Pure Storage REST API client. Dual support for API 1.x (1.16+) and API 2.x (2.0+). Volumes, hosts, snapshots, capacity, pods.</span>
+                <span class="lang-zh">Pure Storage REST API 客戶端。雙版本支援 API 1.x (1.16+) 與 API 2.x (2.0+)。Volume、host、快照、容量、pod。</span>
+            </div>
+        </div>
+        <div class="module-item">
+            <div class="module-item__name">ISCSI.pm</div>
+            <div class="module-item__desc">
+                <span class="lang-en">iSCSI management. Target discovery, login, session handling, device wait. All glob calls protected with alarm timeout.</span>
+                <span class="lang-zh">iSCSI 管理。Target 探索、登入、session 處理、裝置等待。所有 glob 呼叫都有 alarm timeout 保護。</span>
+            </div>
+        </div>
+        <div class="module-item">
+            <div class="module-item__name">Multipath.pm</div>
+            <div class="module-item__desc">
+                <span class="lang-en">Multipath and SCSI device management. SCSI host scan filtered to <code>/sys/class/iscsi_host/</code> only (HPE smartpqi safety). kpartx partition handling.</span>
+                <span class="lang-zh">Multipath 與 SCSI 裝置管理。SCSI host scan 僅針對 <code>/sys/class/iscsi_host/</code>（HPE smartpqi 安全）。kpartx partition 處理。</span>
+            </div>
+        </div>
+        <div class="module-item">
+            <div class="module-item__name">FC.pm</div>
+            <div class="module-item__desc">
+                <span class="lang-en">Fibre Channel HBA management. WWPN discovery via <code>/sys/class/fc_host/</code>, LIP rescan with sysfs timeout.</span>
+                <span class="lang-zh">Fibre Channel HBA 管理。透過 <code>/sys/class/fc_host/</code> 取得 WWPN，含 sysfs timeout 的 LIP rescan。</span>
+            </div>
+        </div>
+        <div class="module-item">
+            <div class="module-item__name">Naming.pm</div>
+            <div class="module-item__desc">
+                <span class="lang-en">Proxmox VE to Pure Storage naming conventions. Volume names, snapshot names, host names, pod prefixes.</span>
+                <span class="lang-zh">Proxmox VE 至 Pure Storage 命名規則。Volume 名稱、快照名稱、host 名稱、pod 前綴。</span>
+            </div>
+        </div>
+        <div class="module-item">
+            <div class="module-item__name">bin/pve-pure-config-get</div>
+            <div class="module-item__desc">
+                <span class="lang-en">CLI tool for retrieving VM configuration backups stored on the array. Useful for disaster recovery scenarios.</span>
+                <span class="lang-zh">用於擷取陣列上 VM 設定備份的 CLI 工具，適用於災難復原情境。</span>
+            </div>
+        </div>
+    </div>
+</section>
+
+<!-- ---- Multipath Safety ---- -->
+<section class="doc-section doc-section--accent" id="multipath-safety">
+    <h2 class="section-title">
+        <span class="lang-en">Multipath Safety Rules</span>
+        <span class="lang-zh">Multipath 安全規則</span>
+    </h2>
+    <div class="alert alert--danger">
+        <strong>
+            <span class="lang-en">READ THIS BEFORE INSTALLING. These rules prevent Proxmox VE node hangs and accidental disconnection of other storage.</span>
+            <span class="lang-zh">安裝前請務必閱讀。這些規則防止 PVE 節點當機及意外斷開其他儲存。</span>
+        </strong>
+    </div>
+
+    <h3 class="subsection-title">
+        <span class="lang-en">Rule 1: NEVER use multipath -F (capital F)</span>
+        <span class="lang-zh">規則 1：絕對不要使用 multipath -F（大寫 F）</span>
+    </h3>
+    <p>
+        <span class="lang-en"><code>multipath -F</code> flushes ALL unused multipath maps system-wide. If you have other storage (manual iSCSI LVM, other vendors, etc.) and there is no active I/O on it at the moment, it will be disconnected. The plugin's <code>multipath_flush()</code> helper refuses to run without a specific device argument. Always use targeted flushing:</span>
+        <span class="lang-zh"><code>multipath -F</code> 會清除系統上所有未使用的 multipath map。如果您有其他儲存（手動 iSCSI LVM、其他廠商等）且當時沒有 active I/O，該儲存會被斷開。Plugin 的 <code>multipath_flush()</code> 沒有指定裝置時會拒絕執行。請使用指定目標的清除：</span>
+    </p>
+    <pre><span class="comment"># Identify stale WWIDs (look for "failed faulty" in all paths)</span>
+<span class="cmd">multipath</span> <span class="flag">-ll</span>
+
+<span class="comment"># Flush ONE specific stale WWID (lowercase f)</span>
+<span class="cmd">multipath</span> <span class="flag">-f</span> 3624a93701234567890abcdef0123456</pre>
+
+    <h3 class="subsection-title">
+        <span class="lang-en">Rule 2: After editing multipath.conf, use restart not reload</span>
+        <span class="lang-zh">規則 2：編輯 multipath.conf 後，使用 restart 而非 reload</span>
+    </h3>
+    <pre><span class="comment"># CORRECT - applies new settings AND flushes stale state</span>
+<span class="cmd">systemctl</span> restart multipathd
+
+<span class="comment"># WRONG - only re-reads config, leaves stale maps in place</span>
+<span class="cmd">systemctl</span> reload multipathd</pre>
+
+    <h3 class="subsection-title">
+        <span class="lang-en">Rule 3: Check your multipath.conf settings</span>
+        <span class="lang-zh">規則 3：檢查您的 multipath.conf 設定</span>
+    </h3>
+    <p>
+        <span class="lang-en">If your config contains any of these, the entire PVE node can hang when a Pure volume is deleted or becomes unavailable:</span>
+        <span class="lang-zh">如果您的設定包含以下任何一項，當 Pure volume 被刪除或變得不可用時，整個 PVE 節點可能會當機：</span>
+    </p>
+    <div class="table-wrap">
+        <table>
+            <thead><tr>
+                <th>
+                    <span class="lang-en">Setting</span>
+                    <span class="lang-zh">設定</span>
+                </th>
+                <th>
+                    <span class="lang-en">Risk</span>
+                    <span class="lang-zh">風險</span>
+                </th>
+                <th>
+                    <span class="lang-en">Fix</span>
+                    <span class="lang-zh">修正</span>
+                </th>
+            </tr></thead>
+            <tbody>
+                <tr>
+                    <td><code>no_path_retry queue</code></td>
+                    <td>
+                        <span class="lang-en">I/O queues forever</span>
+                        <span class="lang-zh">I/O 永久排隊</span>
+                    </td>
+                    <td>
+                        <span class="lang-en">Change to <code>no_path_retry 30</code></span>
+                        <span class="lang-zh">改為 <code>no_path_retry 30</code></span>
+                    </td>
+                </tr>
+                <tr>
+                    <td><code>queue_if_no_path</code></td>
+                    <td>
+                        <span class="lang-en">Same as above</span>
+                        <span class="lang-zh">同上</span>
+                    </td>
+                    <td>
+                        <span class="lang-en">Remove from <code>features</code> line</span>
+                        <span class="lang-zh">從 <code>features</code> 行移除</span>
+                    </td>
+                </tr>
+                <tr>
+                    <td><code>dev_loss_tmo infinity</code></td>
+                    <td>
+                        <span class="lang-en">Stale devices never removed</span>
+                        <span class="lang-zh">殘留裝置永遠不會被移除</span>
+                    </td>
+                    <td>
+                        <span class="lang-en">Change to <code>dev_loss_tmo 60</code></span>
+                        <span class="lang-zh">改為 <code>dev_loss_tmo 60</code></span>
+                    </td>
+                </tr>
+            </tbody>
+        </table>
+    </div>
+
+    <h3 class="subsection-title">
+        <span class="lang-en">Rule 4: lvm.conf global_filter on PVE 7&rarr;9 upgraded nodes</span>
+        <span class="lang-zh">規則 4：從 PVE 7 升級至 9 的節點需設定 lvm.conf global_filter</span>
+    </h3>
+    <p>
+        <span class="lang-en">PVE 9.x ships <code>lvm.conf</code> without a <code>global_filter</code>. On nodes upgraded from PVE 7, the host LVM scanner can auto-activate VGs found INSIDE VM disks (guest OS LVM), which then become "holders" of the multipath device and block volume deletion. The postinst detects this and prints the exact filter to add:</span>
+        <span class="lang-zh">PVE 9.x 出廠的 <code>lvm.conf</code> 沒有 <code>global_filter</code>。從 PVE 7 升級的節點，主機 LVM 掃描器可能 auto-activate VM 磁碟內部的 VG（客體 OS 的 LVM），這些 VG 會成為 multipath 裝置的 "holder" 並擋住 volume 刪除。Postinst 會偵測並印出要加入的 filter：</span>
+    </p>
+    <pre><span class="comment"># /etc/lvm/lvm.conf</span>
+global_filter = [ <span class="string">"r|/dev/mapper/3624a9370.*|"</span>, <span class="string">"a|.*|"</span> ]</pre>
+
+    <h3 class="subsection-title">
+        <span class="lang-en">Rule 5: v1.1.0+ handles cleanup automatically</span>
+        <span class="lang-zh">規則 5：v1.1.0+ 自動處理殘留清理</span>
+    </h3>
+    <p>
+        <span class="lang-en">You do not need to manually clean stale Pure devices after upgrading to v1.1.0+. The plugin tracks every WWID it creates in <code>/var/lib/pve-storage-purestorage/&lt;storeid&gt;-wwids.json</code>, auto-imports cluster-wide WWIDs from the array on every <code>status()</code> poll, and runs background cleanup via a double-fork worker. It only touches WWIDs from the Pure prefix (<code>3624a9370</code>) and never affects other storage.</span>
+        <span class="lang-zh">升級至 v1.1.0+ 後不需要手動清理 Pure 殘留裝置。Plugin 會在 <code>/var/lib/pve-storage-purestorage/&lt;storeid&gt;-wwids.json</code> 追蹤每個建立的 WWID，每次 <code>status()</code> 輪詢時自動從陣列匯入叢集範圍 WWID，並透過 double-fork worker 在背景清理。只會處理 Pure 前綴 (<code>3624a9370</code>) 的 WWID，不會影響其他儲存。</span>
+    </p>
+</section>
+
+<!-- ---- Supported Features ---- -->
+<section class="doc-section" id="supported-features">
+    <h2 class="section-title">
+        <span class="lang-en">Supported Features Matrix</span>
+        <span class="lang-zh">功能支援表</span>
+    </h2>
+    <div class="table-wrap">
+        <table>
+            <thead><tr>
+                <th>
+                    <span class="lang-en">Feature</span>
+                    <span class="lang-zh">功能</span>
+                </th>
+                <th>
+                    <span class="lang-en">Status</span>
+                    <span class="lang-zh">狀態</span>
+                </th>
+                <th>
+                    <span class="lang-en">Notes</span>
+                    <span class="lang-zh">備註</span>
+                </th>
+            </tr></thead>
+            <tbody>
+                <tr><td>
+                    <span class="lang-en">Disk create/delete</span>
+                    <span class="lang-zh">磁碟建立/刪除</span>
+                </td><td><span class="status-badge status-badge--supported">
+                    <span class="lang-en">Supported</span>
+                    <span class="lang-zh">支援</span>
+                </span></td><td>
+                    <span class="lang-en">Pure volume; soft delete with eradicate skipped (24h recovery window)</span>
+                    <span class="lang-zh">Pure volume；軟刪除不立即 eradicate（24 小時可救回）</span>
+                </td></tr>
+                <tr><td>
+                    <span class="lang-en">Disk resize</span>
+                    <span class="lang-zh">磁碟調整大小</span>
+                </td><td><span class="status-badge status-badge--supported">
+                    <span class="lang-en">Supported</span>
+                    <span class="lang-zh">支援</span>
+                </span></td><td>
+                    <span class="lang-en">Online resize with per-device rescan + multipath_resize_map</span>
+                    <span class="lang-zh">支援線上調整，含 per-device rescan 與 multipath_resize_map</span>
+                </td></tr>
+                <tr><td>
+                    <span class="lang-en">Snapshots</span>
+                    <span class="lang-zh">快照</span>
+                </td><td><span class="status-badge status-badge--supported">
+                    <span class="lang-en">Supported</span>
+                    <span class="lang-zh">支援</span>
+                </span></td><td>Pure volume snapshots</td></tr>
+                <tr><td>
+                    <span class="lang-en">Snapshot rollback</span>
+                    <span class="lang-zh">快照倒回</span>
+                </td><td><span class="status-badge status-badge--supported">
+                    <span class="lang-en">Supported</span>
+                    <span class="lang-zh">支援</span>
+                </span></td><td>
+                    <span class="lang-en">VM stopped; flushbufs to invalidate cache</span>
+                    <span class="lang-zh">VM 須停止；含 flushbufs 清除快取</span>
+                </td></tr>
+                <tr><td>
+                    <span class="lang-en">Live migration</span>
+                    <span class="lang-zh">即時遷移</span>
+                </td><td><span class="status-badge status-badge--supported">
+                    <span class="lang-en">Supported</span>
+                    <span class="lang-zh">支援</span>
+                </span></td><td>
+                    <span class="lang-en">Volume connected to all node hosts</span>
+                    <span class="lang-zh">Volume 連接至所有節點 host</span>
+                </td></tr>
+                <tr><td>
+                    <span class="lang-en">Inline dedup &amp; compression</span>
+                    <span class="lang-zh">行內去重與壓縮</span>
+                </td><td><span class="status-badge status-badge--supported">
+                    <span class="lang-en">Always on</span>
+                    <span class="lang-zh">永遠啟用</span>
+                </span></td><td>
+                    <span class="lang-en">Pure Storage native, transparent</span>
+                    <span class="lang-zh">Pure Storage 原生、透明</span>
+                </td></tr>
+                <tr><td>Multipath I/O</td><td><span class="status-badge status-badge--supported">
+                    <span class="lang-en">Supported</span>
+                    <span class="lang-zh">支援</span>
+                </span></td><td>
+                    <span class="lang-en">Auto-config in <code>/etc/multipath/conf.d/pure-storage.conf</code></span>
+                    <span class="lang-zh">自動設定於 <code>/etc/multipath/conf.d/pure-storage.conf</code></span>
+                </td></tr>
+                <tr><td>Template</td><td><span class="status-badge status-badge--supported">
+                    <span class="lang-en">Supported</span>
+                    <span class="lang-zh">支援</span>
+                </span></td><td>
+                    <span class="lang-en">Convert VM to template</span>
+                    <span class="lang-zh">將 VM 轉為範本</span>
+                </td></tr>
+                <tr><td>Linked Clone</td><td><span class="status-badge status-badge--supported">
+                    <span class="lang-en">Supported</span>
+                    <span class="lang-zh">支援</span>
+                </span></td><td>
+                    <span class="lang-en">Via Pure copy-on-write (instant, space-efficient)</span>
+                    <span class="lang-zh">透過 Pure copy-on-write（即時、節省空間）</span>
+                </td></tr>
+                <tr><td>Full Clone</td><td><span class="status-badge status-badge--supported">
+                    <span class="lang-en">Supported</span>
+                    <span class="lang-zh">支援</span>
+                </span></td><td>
+                    <span class="lang-en">Via Proxmox VE built-in copy</span>
+                    <span class="lang-zh">透過 Proxmox VE 內建複製</span>
+                </td></tr>
+                <tr><td>
+                    <span class="lang-en">Full Clone from Snapshot</span>
+                    <span class="lang-zh">從快照完整複製</span>
+                </td><td><span class="status-badge status-badge--supported">
+                    <span class="lang-en">Supported</span>
+                    <span class="lang-zh">支援</span>
+                </span></td><td>
+                    <span class="lang-en">Via temporary Pure clone</span>
+                    <span class="lang-zh">透過暫時 Pure clone</span>
+                </td></tr>
+                <tr><td>Backup (vzdump)</td><td><span class="status-badge status-badge--supported">
+                    <span class="lang-en">Supported</span>
+                    <span class="lang-zh">支援</span>
+                </span></td><td>
+                    <span class="lang-en">Via snapshot</span>
+                    <span class="lang-zh">透過快照</span>
+                </td></tr>
+                <tr><td>RAM Snapshot (vmstate)</td><td><span class="status-badge status-badge--supported">
+                    <span class="lang-en">Supported</span>
+                    <span class="lang-zh">支援</span>
+                </span></td><td>
+                    <span class="lang-en">Stored as separate Pure volume</span>
+                    <span class="lang-zh">存為獨立 Pure volume</span>
+                </td></tr>
+                <tr><td>LXC Container (rootdir)</td><td><span class="status-badge status-badge--supported">
+                    <span class="lang-en">Supported</span>
+                    <span class="lang-zh">支援</span>
+                </span></td><td>
+                    <span class="lang-en">Add <code>rootdir</code> to <code>--content</code></span>
+                    <span class="lang-zh"><code>--content</code> 中加入 <code>rootdir</code></span>
+                </td></tr>
+                <tr><td>EFI Disk</td><td><span class="status-badge status-badge--supported">
+                    <span class="lang-en">Supported</span>
+                    <span class="lang-zh">支援</span>
+                </span></td><td>--</td></tr>
+                <tr><td>Cloud-init Disk</td><td><span class="status-badge status-badge--supported">
+                    <span class="lang-en">Supported</span>
+                    <span class="lang-zh">支援</span>
+                </span></td><td>--</td></tr>
+                <tr><td>TPM State</td><td><span class="status-badge status-badge--supported">
+                    <span class="lang-en">Supported</span>
+                    <span class="lang-zh">支援</span>
+                </span></td><td>--</td></tr>
+                <tr><td>ActiveCluster Pod</td><td><span class="status-badge status-badge--supported">
+                    <span class="lang-en">Supported</span>
+                    <span class="lang-zh">支援</span>
+                </span></td><td>
+                    <span class="lang-en">Set <code>--pure-pod</code> to enable stretched volumes</span>
+                    <span class="lang-zh">設定 <code>--pure-pod</code> 以啟用延伸 volume</span>
+                </td></tr>
+                <tr><td>API 1.x &amp; 2.x</td><td><span class="status-badge status-badge--supported">
+                    <span class="lang-en">Supported</span>
+                    <span class="lang-zh">支援</span>
+                </span></td><td>
+                    <span class="lang-en">Auto-detected at first connection</span>
+                    <span class="lang-zh">首次連線時自動偵測</span>
+                </td></tr>
+            </tbody>
+        </table>
+    </div>
+</section>
+
+<!-- ---- Troubleshooting ---- -->
+<section class="doc-section" id="troubleshooting">
+    <h2 class="section-title">
+        <span class="lang-en">Troubleshooting</span>
+        <span class="lang-zh">疑難排解</span>
+    </h2>
+    <p class="section-subtitle">
+        <span class="lang-en">Common issues and their solutions. For a comprehensive guide, see <a href="https://github.com/jasoncheng7115/jt-pve-storage-purestorage/blob/main/docs/TROUBLESHOOTING.md">docs/TROUBLESHOOTING.md</a> in the repository.</span>
+        <span class="lang-zh">常見問題及解決方案。完整指南請參閱 repository 中的 <a href="https://github.com/jasoncheng7115/jt-pve-storage-purestorage/blob/main/docs/TROUBLESHOOTING_zh-TW.md">docs/TROUBLESHOOTING_zh-TW.md</a>。</span>
+    </p>
+
+    <h3 class="subsection-title">
+        <span class="lang-en">Quick Diagnostic Commands</span>
+        <span class="lang-zh">快速診斷指令</span>
+    </h3>
+    <pre><span class="comment"># Check storage status</span>
+<span class="cmd">pvesm</span> status
+
+<span class="comment"># Check PVE daemon logs</span>
+<span class="cmd">journalctl</span> <span class="flag">-xeu</span> pvedaemon <span class="flag">--since</span> <span class="string">"10 minutes ago"</span>
+
+<span class="comment"># Check iSCSI sessions</span>
+<span class="cmd">iscsiadm</span> <span class="flag">-m</span> session
+
+<span class="comment"># Check multipath devices</span>
+<span class="cmd">multipathd</span> show maps
+
+<span class="comment"># Inspect WWID tracking state</span>
+<span class="cmd">cat</span> /var/lib/pve-storage-purestorage/*-wwids.json
+
+<span class="comment"># Check Pure API connectivity</span>
+<span class="cmd">curl</span> <span class="flag">-k</span> <span class="flag">-H</span> <span class="string">"api-token: YOUR-TOKEN"</span> https://PURE_IP/api/2.21/arrays</pre>
+
+    <details>
+        <summary>
+            <span class="lang-en">Storage Not Active</span>
+            <span class="lang-zh">儲存未啟用</span>
+        </summary>
+        <div class="detail-content">
+            <p>
+                <span class="lang-en"><strong>Symptoms:</strong> Storage shows "inactive" in <code>pvesm status</code>. Cannot create VMs on storage.</span>
+                <span class="lang-zh"><strong>症狀：</strong>在 <code>pvesm status</code> 中顯示 "inactive"。無法在該儲存上建立 VM。</span>
+            </p>
+            <p><strong>
+                <span class="lang-en">Common Causes:</span>
+                <span class="lang-zh">常見原因：</span>
+            </strong></p>
+            <ul>
+                <li><span class="lang-en">Invalid API token or credentials -- test with: <code>curl -k -H "api-token: TOKEN" https://192.168.1.100/api/2.21/arrays</code></span><span class="lang-zh">API token 或帳密無效 -- 測試指令：<code>curl -k -H "api-token: TOKEN" https://192.168.1.100/api/2.21/arrays</code></span></li>
+                <li><span class="lang-en">Network connectivity -- check: <code>ping &lt;pure-portal&gt;</code> and <code>nc -zv &lt;pure-portal&gt; 443</code></span><span class="lang-zh">網路連線問題 -- 檢查：<code>ping &lt;pure-portal&gt;</code> 及 <code>nc -zv &lt;pure-portal&gt; 443</code></span></li>
+                <li><span class="lang-en">SSL certificate issues -- temporarily disable: <code>pvesm set &lt;storage-id&gt; --pure-ssl-verify 0</code></span><span class="lang-zh">SSL 憑證問題 -- 暫時停用：<code>pvesm set &lt;storage-id&gt; --pure-ssl-verify 0</code></span></li>
+                <li><span class="lang-en">REST API disabled on the array (rare; default is enabled)</span><span class="lang-zh">陣列上停用了 REST API（少見；預設啟用）</span></li>
+            </ul>
+        </div>
+    </details>
+
+    <details>
+        <summary>
+            <span class="lang-en">Device Not Found After Create</span>
+            <span class="lang-zh">建立後找不到裝置</span>
+        </summary>
+        <div class="detail-content">
+            <p>
+                <span class="lang-en"><strong>Symptoms:</strong> Disk created successfully on the array but device not appearing in <code>/dev/</code>.</span>
+                <span class="lang-zh"><strong>症狀：</strong>磁碟在陣列上建立成功但裝置未出現在 <code>/dev/</code> 中。</span>
+            </p>
+            <p><strong>
+                <span class="lang-en">Solutions:</span>
+                <span class="lang-zh">解決方案：</span>
+            </strong></p>
+            <pre><span class="comment"># Rescan iSCSI sessions</span>
+<span class="cmd">iscsiadm</span> <span class="flag">-m</span> session <span class="flag">--rescan</span>
+
+<span class="comment"># Reload multipath</span>
+<span class="cmd">multipathd</span> reconfigure
+<span class="cmd">multipath</span> <span class="flag">-v2</span>
+
+<span class="comment"># Verify host connection on the array</span>
+<span class="comment"># Pure UI: Storage &gt; Hosts &gt; pve-{cluster}-{node} &gt; Connected Volumes</span></pre>
+        </div>
+    </details>
+
+    <details>
+        <summary>
+            <span class="lang-en">Host Connection Issues</span>
+            <span class="lang-zh">Host 連線問題</span>
+        </summary>
+        <div class="detail-content">
+            <p>
+                <span class="lang-en"><strong>Symptoms:</strong> Volume created and mapped but node cannot see the device. <code>iscsiadm -m session</code> shows active sessions but <code>lsscsi</code> shows no PURE devices.</span>
+                <span class="lang-zh"><strong>症狀：</strong>Volume 已建立並對應但節點看不到裝置。<code>iscsiadm -m session</code> 顯示 active session 但 <code>lsscsi</code> 沒有 PURE 裝置。</span>
+            </p>
+            <p>
+                <span class="lang-en">Verify the node's iSCSI initiator IQN (from <code>/etc/iscsi/initiatorname.iscsi</code>) is listed under the correct Pure host (<code>pve-{cluster}-{node}</code>). Check on the array UI: Storage &gt; Hosts &gt; select your node &gt; Host Ports.</span>
+                <span class="lang-zh">確認節點的 iSCSI initiator IQN（來自 <code>/etc/iscsi/initiatorname.iscsi</code>）已列在正確的 Pure host (<code>pve-{cluster}-{node}</code>) 下。在陣列 UI 檢查：Storage &gt; Hosts &gt; 選擇您的節點 &gt; Host Ports。</span>
+            </p>
+        </div>
+    </details>
+
+    <details>
+        <summary>
+            <span class="lang-en">Hung Kernel Tasks (vgs blocked, D-state processes)</span>
+            <span class="lang-zh">Kernel 卡住（vgs 阻塞、D-state 行程）</span>
+        </summary>
+        <div class="detail-content">
+            <p>
+                <span class="lang-en"><strong>Symptoms:</strong> <code>vgs</code> or other commands hang. <code>ps aux</code> shows processes in D state. PVE operations time out.</span>
+                <span class="lang-zh"><strong>症狀：</strong><code>vgs</code> 或其他指令卡住。<code>ps aux</code> 顯示 D state 的行程。PVE 操作逾時。</span>
+            </p>
+            <p>
+                <span class="lang-en"><strong>Root cause:</strong> Usually a stale multipath device with <code>queue_if_no_path</code> or <code>no_path_retry queue</code>. Any process that touches the device enters uninterruptible sleep (D-state).</span>
+                <span class="lang-zh"><strong>根本原因：</strong>通常是設定了 <code>queue_if_no_path</code> 或 <code>no_path_retry queue</code> 的殘留 multipath 裝置。任何碰觸該裝置的行程都會進入不可中斷睡眠（D-state）。</span>
+            </p>
+            <p><strong>
+                <span class="lang-en">Manual cleanup for stale devices with queue_if_no_path:</span>
+                <span class="lang-zh">有 queue_if_no_path 的殘留裝置手動清理：</span>
+            </strong></p>
+            <pre><span class="comment"># 1. Disable queueing</span>
+<span class="cmd">multipathd</span> disablequeueing map &lt;wwid&gt;
+<span class="cmd">dmsetup</span> message &lt;wwid&gt; 0 fail_if_no_path
+
+<span class="comment"># 2. Flush the specific device</span>
+<span class="cmd">multipath</span> <span class="flag">-f</span> &lt;wwid&gt;
+
+<span class="comment"># 3. If step 2 fails, force remove</span>
+<span class="cmd">dmsetup</span> remove <span class="flag">--force --retry</span> &lt;wwid&gt;</pre>
+        </div>
+    </details>
+
+    <details>
+        <summary>
+            <span class="lang-en">Cannot Delete Volume (LVM holders / "device is still in use")</span>
+            <span class="lang-zh">無法刪除 Volume（LVM holders / 「裝置仍在使用中」）</span>
+        </summary>
+        <div class="detail-content">
+            <p>
+                <span class="lang-en"><strong>Symptoms:</strong> <code>Cannot delete volume: device is still in use (has holders)</code>. Common on PVE nodes upgraded from 7 to 8 to 9.</span>
+                <span class="lang-zh"><strong>症狀：</strong><code>Cannot delete volume: device is still in use (has holders)</code>。常見於從 PVE 7 升級至 8 再到 9 的節點。</span>
+            </p>
+            <p>
+                <span class="lang-en"><strong>Root cause:</strong> The host's LVM scanner auto-activated VGs found INSIDE VM disks (guest OS LVM). This happens when <code>/etc/lvm/lvm.conf</code> has no <code>global_filter</code> to exclude Pure multipath devices. Note: kpartx partition holders are NOT this case (v1.1.7 fixed that separately).</span>
+                <span class="lang-zh"><strong>根本原因：</strong>主機的 LVM 掃描器自動 activate 了 VM 磁碟裡面的 VG（客體 OS 的 LVM）。這在 <code>/etc/lvm/lvm.conf</code> 沒有 <code>global_filter</code> 排除 Pure multipath 裝置時會發生。注意：kpartx partition holders 不是這個情境（v1.1.7 已另外修復）。</span>
+            </p>
+            <p><strong>
+                <span class="lang-en">Fix:</span>
+                <span class="lang-zh">修復：</span>
+            </strong></p>
+            <pre><span class="comment"># Deactivate the guest VG on the host</span>
+<span class="cmd">vgchange</span> <span class="flag">-an</span> &lt;guest-vg-name&gt;
+
+<span class="comment"># Long-term fix: add global_filter to /etc/lvm/lvm.conf</span>
+<span class="comment"># global_filter = [ "r|/dev/mapper/3624a9370.*|", "a|.*|" ]</span></pre>
+        </div>
+    </details>
+
+    <details>
+        <summary>
+            <span class="lang-en">Common Error Messages</span>
+            <span class="lang-zh">常見錯誤訊息</span>
+        </summary>
+        <div class="detail-content">
+            <div class="table-wrap">
+                <table>
+                    <thead><tr>
+                        <th>
+                            <span class="lang-en">Error</span>
+                            <span class="lang-zh">錯誤</span>
+                        </th>
+                        <th>
+                            <span class="lang-en">Cause / Fix</span>
+                            <span class="lang-zh">原因 / 修復</span>
+                        </th>
+                    </tr></thead>
+                    <tbody>
+                        <tr><td><code>unknown storage type 'purestorage'</code></td><td>
+                            <span class="lang-en">Plugin not loaded. Reinstall and restart pvedaemon.</span>
+                            <span class="lang-zh">Plugin 未載入。重新安裝並重啟 pvedaemon。</span>
+                        </td></tr>
+                        <tr><td><code>device is still in use (has holders)</code></td><td>
+                            <span class="lang-en">Either guest LVM auto-activated (see above) or pre-1.1.7 kpartx partition issue (upgrade required).</span>
+                            <span class="lang-zh">客體 LVM 自動 activate（見上方），或是 1.1.7 之前的 kpartx 問題（需升級）。</span>
+                        </td></tr>
+                        <tr><td><code>Cannot grow device files</code></td><td>
+                            <span class="lang-en">Kernel did not see new volume size. Fixed in v1.1.2+ (per-device rescan).</span>
+                            <span class="lang-zh">Kernel 未偵測到新的 volume 大小。v1.1.2+ 已修復（per-device rescan）。</span>
+                        </td></tr>
+                        <tr><td><code>trying to acquire lock... got timeout</code></td><td>
+                            <span class="lang-en">D-state child blocking kernel lock. See "Hung Kernel Tasks" above. Upgrade to v1.1.5+.</span>
+                            <span class="lang-zh">D-state child 佔住 kernel lock。見上方「Kernel 卡住」。請升級至 v1.1.5+。</span>
+                        </td></tr>
+                        <tr><td><code>sysfs write ... timed out</code></td><td>
+                            <span class="lang-en">Writing to non-iSCSI SCSI host (HPE smartpqi, Dell PERC). Fixed in v1.1.5+ by filtering to <code>/sys/class/iscsi_host/</code> only.</span>
+                            <span class="lang-zh">對非 iSCSI SCSI host 寫入（HPE smartpqi、Dell PERC）。v1.1.5+ 已修復，僅針對 <code>/sys/class/iscsi_host/</code>。</span>
+                        </td></tr>
+                        <tr><td><code>Volume already exists on Pure Storage</code></td><td>
+                            <span class="lang-en">Disk-id collision (TOCTOU race) -- v1.1.x retries with bounded loop. If persistent, check the array UI for the volume name.</span>
+                            <span class="lang-zh">Disk-id 碰撞（TOCTOU race）-- v1.1.x 已加入有界重試。若持續發生，請於陣列 UI 檢查該 volume 名稱。</span>
+                        </td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </details>
+</section>
+
+<!-- ---- Changelog ---- -->
+<section class="doc-section" id="changelog">
+    <h2 class="section-title">
+        <span class="lang-en">Changelog</span>
+        <span class="lang-zh">變更紀錄</span>
+    </h2>
+    <p class="section-subtitle">
+        <span class="lang-en">Version history. For full details see <a href="https://github.com/jasoncheng7115/jt-pve-storage-purestorage/blob/main/CHANGELOG.md">CHANGELOG.md</a>.</span>
+        <span class="lang-zh">版本紀錄。完整內容請參閱 <a href="https://github.com/jasoncheng7115/jt-pve-storage-purestorage/blob/main/CHANGELOG_zh-TW.md">CHANGELOG_zh-TW.md</a>。</span>
+    </p>
+
+    <div class="changelog-entry">
+        <div class="changelog-version">v1.1.8 <span class="changelog-tag changelog-tag--fix">Fix</span></div>
+        <div class="changelog-date">2026-04-26</div>
+        <div class="changelog-summary">
+            <span class="lang-en">Sibling-pattern audit from NetApp v0.2.9 lessons. Fixed <code>_cleanup_orphaned_devices()</code> unconditionally untracking WWIDs after a failed cleanup (mirrors the conditional-untrack pattern in <code>free_image()</code>). Wrapped <code>glob("/dev/disk/by-id/...")</code> calls in <code>alarm(5)</code> to bound the lookup if the underlying block layer hangs.</span>
+            <span class="lang-zh">來自 NetApp v0.2.9 的 sibling-pattern 稽核。修復 <code>_cleanup_orphaned_devices()</code> 在清理失敗後仍無條件 untrack WWID（鏡像 <code>free_image()</code> 的 conditional-untrack 模式）。<code>glob("/dev/disk/by-id/...")</code> 加上 <code>alarm(5)</code> 保護，避免底層 block layer 卡住時無上限等待。</span>
+        </div>
+    </div>
+
+    <div class="changelog-entry">
+        <div class="changelog-version">v1.1.7 <span class="changelog-tag changelog-tag--critical">Critical</span></div>
+        <div class="changelog-date">2026-04-11</div>
+        <div class="changelog-summary">
+            <span class="lang-en">kpartx Partition Holder Fix. Fixed <code>is_device_in_use()</code> blocking ALL volume deletions for VMs with GPT/MBR partition tables (i.e. every production VM). Distinguishes bare kpartx partitions from real holders (LVM, dm-crypt). Added <code>kpartx -d</code> in cleanup before <code>multipath -f</code>.</span>
+            <span class="lang-zh">kpartx Partition Holder 修復。修復 <code>is_device_in_use()</code> 擋住所有有 GPT/MBR partition table 的 VM disk 刪除（即所有正式環境 VM）。區分 bare kpartx partition 與真正的 holder（LVM、dm-crypt）。新增 <code>kpartx -d</code> 在 <code>multipath -f</code> 之前清理。</span>
+        </div>
+    </div>
+
+    <div class="changelog-entry">
+        <div class="changelog-version">v1.1.6 <span class="changelog-tag changelog-tag--fix">Fix</span></div>
+        <div class="changelog-date">2026-04-10</div>
+        <div class="changelog-summary">
+            <span class="lang-en">Postinst Service Reload + lvm.conf Detection. Reloads pvedaemon, pvestatd, pveproxy via SIGHUP (not restart, to avoid stop-phase hang on D-state children). Detects missing <code>lvm.conf global_filter</code> on PVE 7&rarr;9 upgraded nodes and prints the exact filter to add.</span>
+            <span class="lang-zh">Postinst 服務 Reload + lvm.conf 偵測。透過 SIGHUP reload pvedaemon、pvestatd、pveproxy（不用 restart，避免 stop 階段在 D-state child 上卡住）。偵測 PVE 7→9 升級節點上缺少的 <code>lvm.conf global_filter</code> 並印出正確 filter。</span>
+        </div>
+    </div>
+
+    <div class="changelog-entry">
+        <div class="changelog-version">v1.1.5 <span class="changelog-tag changelog-tag--critical">Critical</span></div>
+        <div class="changelog-date">2026-04-10</div>
+        <div class="changelog-summary">
+            <span class="lang-en">Non-iSCSI SCSI Host Scan Fix (HPE ProLiant production incident). Fixed <code>rescan_scsi_hosts()</code> writing to <code>/sys/class/scsi_host/</code> hosts that include hardware controllers (smartpqi, PERC, megaraid_sas), causing 600+ second D-state cascades. Now sources host list from <code>/sys/class/iscsi_host/</code> only. Added <code>translate_pure_error()</code> for operator-friendly limit-error messages.</span>
+            <span class="lang-zh">非 iSCSI SCSI Host 掃描修復（HPE ProLiant 正式環境事件）。修復 <code>rescan_scsi_hosts()</code> 對 <code>/sys/class/scsi_host/</code> 中的硬體控制器（smartpqi、PERC、megaraid_sas）寫入，導致 600+ 秒 D-state 連鎖。改從 <code>/sys/class/iscsi_host/</code> 取得 host 清單。新增 <code>translate_pure_error()</code> 提供 operator 友善的 limit-error 訊息。</span>
+        </div>
+    </div>
+
+    <div class="changelog-entry">
+        <div class="changelog-version">v1.1.4 <span class="changelog-tag changelog-tag--fix">Fix</span></div>
+        <div class="changelog-date">2026-04-09</div>
+        <div class="changelog-summary">
+            <span class="lang-en">API 1.x Disconnect Normalisation. Fixed <code>volume_get_connections</code> returning different shapes for API 1.x vs 2.x; 1.x's <code>$conn->{name}</code> was the volume name, not host name -- making disconnect a silent no-op and leaving ghost LUNs after partial connect failures.</span>
+            <span class="lang-zh">API 1.x 斷線正規化。修復 <code>volume_get_connections</code> 對 API 1.x 與 2.x 回傳不同結構；1.x 的 <code>$conn->{name}</code> 是 volume 名稱不是 host 名稱，導致 disconnect 變成 no-op，partial connect 失敗後留下 ghost LUN。</span>
+        </div>
+    </div>
+
+    <details>
+        <summary>
+            <span class="lang-en">Older versions (v1.1.3 -- v1.0.x)</span>
+            <span class="lang-zh">更早版本（v1.1.3 -- v1.0.x）</span>
+        </summary>
+        <div class="detail-content">
+            <div class="changelog-entry">
+                <div class="changelog-version">v1.1.3 <span class="changelog-tag changelog-tag--fix">Fix</span></div>
+                <div class="changelog-date">2026-04-09</div>
+                <div class="changelog-summary">
+                    <span class="lang-en">Partial Connect Cleanup. Cleanup paths now call <code>_disconnect_from_all_hosts()</code> before <code>volume_delete()</code> -- partial successful connects no longer leave orphaned host connections that become ghost LUNs.</span>
+                    <span class="lang-zh">Partial Connect 清理。Cleanup 路徑會先 <code>_disconnect_from_all_hosts()</code> 再 <code>volume_delete()</code> -- 部分成功的連線不再留下變成 ghost LUN 的孤兒 host connection。</span>
+                </div>
+            </div>
+
+            <div class="changelog-entry">
+                <div class="changelog-version">v1.1.2 <span class="changelog-tag changelog-tag--critical">Critical</span></div>
+                <div class="changelog-date">2026-04-09</div>
+                <div class="changelog-summary">
+                    <span class="lang-en">Data Loss Protection. Fixed <code>is_device_in_use(/dev/mapper/&lt;wwid&gt;)</code> always returning false because basename of a symlink doesn't exist under <code>/sys/block/</code> -- was silently destroying LVM-on-Pure. Per-device rescan after resize. <code>blockdev --flushbufs</code> after rollback to invalidate stale page cache.</span>
+                    <span class="lang-zh">資料保護。修復 <code>is_device_in_use(/dev/mapper/&lt;wwid&gt;)</code> 永遠回傳 false，因為 symlink 的 basename 在 <code>/sys/block/</code> 不存在 -- 導致 LVM-on-Pure 被悄悄破壞。Resize 後改用 per-device rescan。Rollback 後加 <code>blockdev --flushbufs</code> 清除過期 page cache。</span>
+                </div>
+            </div>
+
+            <div class="changelog-entry">
+                <div class="changelog-version">v1.1.1 <span class="changelog-tag changelog-tag--fix">Fix</span></div>
+                <div class="changelog-date">2026-04-09</div>
+                <div class="changelog-summary">
+                    <span class="lang-en">Multipath Config Auto-upgrade. Added version marker (<code># pure-multipath-config-version: N</code>) to plugin-managed <code>pure-storage.conf</code> so future upgrades can automatically rewrite outdated device blocks.</span>
+                    <span class="lang-zh">Multipath 設定自動升級。在 plugin 管理的 <code>pure-storage.conf</code> 加入版本標記（<code># pure-multipath-config-version: N</code>），未來升級可自動覆寫過期 device block。</span>
+                </div>
+            </div>
+
+            <div class="changelog-entry">
+                <div class="changelog-version">v1.1.0 <span class="changelog-tag changelog-tag--feature">Feature</span></div>
+                <div class="changelog-date">2026-04-09</div>
+                <div class="changelog-summary">
+                    <span class="lang-en">Cluster Orphan Device Cleanup. Per-storage WWID tracking file. Auto-import of cluster-wide WWIDs from the array on every <code>status()</code> poll. Background cleanup via double-fork worker. Per-WWID warning cooldown (1 hour). 60s extended timeout for <code>volume_delete</code>.</span>
+                    <span class="lang-zh">叢集殘留裝置清理。Per-storage 的 WWID tracking 檔。每次 <code>status()</code> 輪詢自動從陣列匯入叢集範圍 WWID。透過 double-fork worker 在背景清理。Per-WWID 警告冷卻（1 小時）。<code>volume_delete</code> 延長至 60 秒 timeout。</span>
+                </div>
+            </div>
+
+            <div class="changelog-entry">
+                <div class="changelog-version">v1.0.49 <span class="changelog-tag changelog-tag--fix">Fix</span></div>
+                <div class="changelog-date">2026-02-27</div>
+                <div class="changelog-summary">
+                    <span class="lang-en">Late 1.0.x stabilisation. Final round of small bug fixes before the 1.1.0 architecture jump.</span>
+                    <span class="lang-zh">1.0.x 末期穩定化。1.1.0 架構升級前最後一輪小型修復。</span>
+                </div>
+            </div>
+
+            <div class="changelog-entry">
+                <div class="changelog-version">v1.0.48 <span class="changelog-tag changelog-tag--fix">Fix</span></div>
+                <div class="changelog-date">2026-02-12</div>
+                <div class="changelog-summary">
+                    <span class="lang-en">FC SAN bug fixes and dependency cleanups.</span>
+                    <span class="lang-zh">FC SAN bug 修復與相依套件整理。</span>
+                </div>
+            </div>
+
+            <div class="changelog-entry">
+                <div class="changelog-version">v1.0.0 -- v1.0.47</div>
+                <div class="changelog-date">2025 -- early 2026</div>
+                <div class="changelog-summary">
+                    <span class="lang-en">Initial release through to mid-1.0.x maturation. iSCSI / FC dual-protocol, snapshot, clone, template, online resize, RAM snapshot, LXC, EFI / Cloud-init / TPM support, multipath auto-config. See CHANGELOG.md for the full per-version detail.</span>
+                    <span class="lang-zh">初始 release 至 1.0.x 中期成熟。iSCSI / FC 雙協定、快照、複製、範本、線上 resize、RAM snapshot、LXC、EFI / Cloud-init / TPM 支援、multipath 自動設定。完整逐版細節請見 CHANGELOG.md。</span>
+                </div>
+            </div>
+        </div>
+    </details>
+</section>
+
+<!-- ---- Acknowledgments ---- -->
+<section class="doc-section" id="acknowledgments">
+    <h2 class="section-title">
+        <span class="lang-en">Acknowledgments</span>
+        <span class="lang-zh">致謝</span>
+    </h2>
+    <p>
+        <span class="lang-en">Thanks to the Proxmox VE community for the well-documented Storage Plugin API, and to Pure Storage for publishing comprehensive REST API documentation that made dual 1.x/2.x support straightforward.</span>
+        <span class="lang-zh">感謝 Proxmox VE 社群提供文件完善的 Storage Plugin API，也感謝 Pure Storage 公開完整的 REST API 文件，讓 1.x/2.x 雙版本支援得以順利實作。</span>
+    </p>
+
+    <h3 class="subsection-title">
+        <span class="lang-en">References</span>
+        <span class="lang-zh">參考資料</span>
+    </h3>
+    <ul>
+        <li><a href="https://pve.proxmox.com/wiki/Storage_Plugin_Development" target="_blank" rel="noopener">Proxmox Storage Plugin Development</a></li>
+        <li><a href="https://support.purestorage.com/" target="_blank" rel="noopener">Pure Storage Support &amp; Documentation</a></li>
+        <li><a href="https://blog.purestorage.com/" target="_blank" rel="noopener">Pure Storage Blog</a></li>
+    </ul>
+</section>
+
+</div><!-- /content-wrap -->
+
+<!-- ---- Footer ---- -->
+<footer class="footer">
+    <div class="footer__inner">
+        <div>
+            <span class="lang-en">MIT License | Jason Cheng (Jason Tools)</span>
+            <span class="lang-zh">MIT 授權 | Jason Cheng (Jason Tools)</span>
+        </div>
+        <div class="footer__center">
+            <span class="lang-en">Icons by <a href="https://iconoir.com/" target="_blank" rel="noopener">Iconoir</a> (MIT License)</span>
+            <span class="lang-zh">圖示來源：<a href="https://iconoir.com/" target="_blank" rel="noopener">Iconoir</a>（MIT 授權）</span>
+        </div>
+        <div>
+            <a href="https://github.com/jasoncheng7115/jt-pve-storage-purestorage" target="_blank" rel="noopener">
+                <span class="lang-en">View on GitHub</span>
+                <span class="lang-zh">GitHub 原始碼</span>
+            </a>
+        </div>
+    </div>
+</footer>
+
+</main>
+
+<script>
+(function() {
+    // Sidebar search filter
+    // Clear all highlights
+    function clearHighlights() {
+        document.querySelectorAll('mark.search-hl').forEach(function(m) {
+            var parent = m.parentNode;
+            parent.replaceChild(document.createTextNode(m.textContent), m);
+            parent.normalize();
+        });
+    }
+
+    // Highlight text in a node tree (skip script, style, code, pre, mark)
+    function highlightIn(el, q) {
+        var skip = {SCRIPT:1, STYLE:1, MARK:1, PRE:1, CODE:1, TEXTAREA:1, INPUT:1};
+        var walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT, null);
+        var hits = [];
+        while (walker.nextNode()) {
+            var node = walker.currentNode;
+            if (skip[node.parentNode.tagName]) continue;
+            var idx = node.textContent.toLowerCase().indexOf(q);
+            if (idx !== -1) hits.push({node: node, idx: idx});
+        }
+        // Process in reverse so earlier indices stay valid
+        for (var i = hits.length - 1; i >= 0; i--) {
+            var h = hits[i];
+            var before = h.node.splitText(h.idx);
+            var match = before.splitText(q.length);
+            var mark = document.createElement('mark');
+            mark.className = 'search-hl';
+            mark.textContent = before.textContent;
+            before.parentNode.replaceChild(mark, before);
+        }
+    }
+
+    var searchTimer = null;
+    window.filterSidebar = function(query) {
+        clearTimeout(searchTimer);
+        var q = query.toLowerCase().trim();
+        var links = document.querySelectorAll('.sidebar__link');
+        var sections = document.querySelectorAll('.sidebar__section');
+
+        // Clear previous highlights
+        clearHighlights();
+
+        links.forEach(function(link) {
+            if (q === '' || q.length < 2) {
+                link.style.display = '';
+                return;
+            }
+            var linkText = link.textContent.toLowerCase();
+            var match = linkText.indexOf(q) !== -1;
+            if (!match) {
+                var href = link.getAttribute('href');
+                if (href && href.startsWith('#')) {
+                    var target = document.getElementById(href.substring(1));
+                    if (target) match = target.textContent.toLowerCase().indexOf(q) !== -1;
+                }
+            }
+            link.style.display = match ? '' : 'none';
+        });
+        sections.forEach(function(sec) {
+            var visibleLinks = sec.querySelectorAll('.sidebar__link:not([style*="display: none"])');
+            var heading = sec.querySelector('.sidebar__heading');
+            if (heading) heading.style.display = (q === '' || q.length < 2 || visibleLinks.length > 0) ? '' : 'none';
+        });
+
+        // Debounce highlight (heavier operation)
+        if (q.length >= 2) {
+            searchTimer = setTimeout(function() {
+                var lang = document.documentElement.getAttribute('data-lang') || 'en';
+                document.querySelectorAll('.doc-section').forEach(function(sec) {
+                    if (sec.textContent.toLowerCase().indexOf(q) !== -1) {
+                        highlightIn(sec, q);
+                    }
+                });
+            }, 300);
+        }
+    };
+
+    // Language toggle
+    window.toggleLang = function() {
+        var current = document.documentElement.getAttribute('data-lang');
+        var next = current === 'en' ? 'zh' : 'en';
+        var url = new URL(window.location);
+        url.searchParams.set('lang', next);
+        window.location.href = url.toString();
+    };
+
+    // Restore language: URL param > localStorage > default (en)
+    // Usage: ?lang=zh or ?lang=en
+    var urlLang = new URLSearchParams(window.location.search).get('lang');
+    if (urlLang === 'en' || urlLang === 'zh') {
+        document.documentElement.setAttribute('data-lang', urlLang);
+        try { localStorage.setItem('jt-pure-lang', urlLang); } catch(e) {}
+    } else {
+        try {
+            var saved = localStorage.getItem('jt-pure-lang');
+            if (saved === 'en' || saved === 'zh') {
+                document.documentElement.setAttribute('data-lang', saved);
+            }
+        } catch(e) {}
+    }
+
+    // Sidebar toggle (mobile)
+    window.toggleSidebar = function() {
+        var sidebar = document.getElementById('sidebar');
+        var overlay = document.querySelector('.sidebar-overlay');
+        sidebar.classList.toggle('open');
+        overlay.classList.toggle('show');
+    };
+
+    // Close sidebar when clicking a link (mobile)
+    var sidebarLinks = document.querySelectorAll('.sidebar__link');
+    sidebarLinks.forEach(function(link) {
+        link.addEventListener('click', function() {
+            if (window.innerWidth <= 1024) {
+                var sidebar = document.getElementById('sidebar');
+                var overlay = document.querySelector('.sidebar-overlay');
+                sidebar.classList.remove('open');
+                overlay.classList.remove('show');
+            }
+        });
+    });
+
+    // Active sidebar link tracking on scroll
+    var sections = document.querySelectorAll('.doc-section, .hero');
+    var navLinks = document.querySelectorAll('.sidebar__link');
+
+    function updateActiveLink() {
+        var scrollPos = window.scrollY + 100;
+        var current = '';
+        sections.forEach(function(section) {
+            if (section.offsetTop <= scrollPos) {
+                current = section.id;
+            }
+        });
+        navLinks.forEach(function(link) {
+            link.classList.remove('active');
+            if (link.getAttribute('href') === '#' + current) {
+                link.classList.add('active');
+            }
+        });
+    }
+
+    var scrollTimer;
+    window.addEventListener('scroll', function() {
+        if (scrollTimer) cancelAnimationFrame(scrollTimer);
+        scrollTimer = requestAnimationFrame(updateActiveLink);
+    });
+    updateActiveLink();
+})();
+</script>
+
+</body>
+</html>
