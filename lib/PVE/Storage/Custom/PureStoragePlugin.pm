@@ -352,8 +352,12 @@ sub _untrack_wwid {
 #          find anything to clean up.
 # Phase 2: for every WWID in the tracking file that is NOT in the current
 #          array alive-set, if it has a local multipath device, clean it up.
-#          Then untrack it (whether or not the cleanup succeeded — repeated
-#          cleanup is idempotent).
+#          Only untrack the WWID if cleanup verifiably succeeded (multipath
+#          device gone). If cleanup failed, KEEP the WWID tracked so the
+#          next pass can retry — without this, a single transient failure
+#          (kpartx holders, multipathd glitch, dmsetup busy) would silently
+#          leak a stale device because Phase 1 cannot re-import a WWID
+#          whose volume has been deleted from the array.
 # Phase 3: best-effort warning for Pure multipath devices on this node that
 #          are not in tracking and not on the array. We do NOT auto-clean
 #          these because they could be from a manually-attached LUN, another
@@ -402,6 +406,19 @@ sub _cleanup_orphaned_devices {
             }
             eval { cleanup_lun_devices($wwid); };
             warn "orphan cleanup: cleanup of $wwid failed: $@\n" if $@;
+
+            # Verify the multipath device is actually gone before untracking.
+            # Mirrors the conditional-untrack pattern in free_image(): if the
+            # device is still present, keep the WWID tracked so the next
+            # status() poll retries. Without this guard a partial cleanup
+            # (e.g. kpartx holder, queue_if_no_path stuck) would untrack the
+            # WWID and leave a stale device that no future pass can find.
+            my $still_present = eval { get_multipath_device($wwid); };
+            if ($still_present) {
+                warn "orphan cleanup: device for WWID $wwid still present after cleanup, " .
+                     "keeping tracked for retry.\n";
+                next;
+            }
         }
         eval { _untrack_wwid($storeid, $wwid); };
     }

@@ -8,6 +8,37 @@
 
 ---
 
+## [1.1.8] - 2026-04-26
+
+### 來自 NetApp v0.2.9 的 sibling-pattern 稽核
+
+姊妹版 NetApp 插件針對兩個問題出了修正，引發本專案進行 sibling-pattern
+稽核。其中兩個在此程式碼有對應的 bug，另外三個沒有（Pure 直接以卷名做
+identifier，不會踩到 create-then-lookup 的 eventual consistency 視窗；
+`alloc_image` 早已是有界 retry loop；`multipath -F` 已是 forbidden
+pattern）。
+
+#### 修正
+- **[中等] `_cleanup_orphaned_devices()` 現在會先驗證本機 multipath 裝置
+  確實消失才 untrack WWID。** 過去該函式在 `cleanup_lun_devices()` 之後
+  無條件呼叫 `_untrack_wwid()`，即使清理失敗也照樣 untrack。在卷已從陣列
+  刪除的情況下，Phase 1 無法重新 import 該 WWID，導致一次清理失敗
+  （kpartx holder、multipathd 故障、dmsetup busy）就會悄悄留下殘留裝置，
+  之後任何 status() 輪詢都找不到它。此修正鏡像 `free_image()` 在 1.1.x
+  已採用的 conditional-untrack 模式：若 `get_multipath_device($wwid)`
+  仍能回傳路徑，保留 WWID tracking 以便下一輪重試；只在驗證消失後才
+  untrack。
+
+- **[低] `glob("/dev/disk/by-id/...")` 呼叫加上 5 秒 alarm 保護**，影響
+  `Multipath::get_device_by_wwid()`、`ISCSI::wait_for_device()`、
+  `ISCSI::get_device_by_serial()`。`get_device_by_wwid()` 在 glob 之後的
+  `-b` stat 會解析 symlink 到 `/dev/sd*` 或 `/dev/dm-*`；當 multipath
+  裝置所有路徑都失效且 `queue_if_no_path` 仍生效時，這個 stat 會掉進與
+  `vgs`、`lvs` 相同的 kernel block-layer wait。模式與既有的 `_run_cmd`、
+  `sysfs_read_with_timeout` 一致。
+
+---
+
 ## [1.1.7] - 2026-04-11
 
 ### 重大 — kpartx partition holder 擋住所有卷刪除

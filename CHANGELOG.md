@@ -8,6 +8,41 @@ this project adheres to a `MAJOR.MINOR.PATCH-DEBIAN` versioning scheme.
 
 ---
 
+## [1.1.8] - 2026-04-26
+
+### Sibling-pattern audit from NetApp v0.2.9 lessons
+
+The sibling NetApp plugin shipped fixes for two issues that called for a
+sibling-pattern audit on this codebase. Two of those issues had real
+counterparts here; three did not (Pure uses volume names directly as
+identifiers so it is not exposed to the lookup-after-create eventual
+consistency window; `alloc_image` was already a bounded retry loop;
+`multipath -F` is already a forbidden pattern).
+
+#### Fixed
+- **[MEDIUM] `_cleanup_orphaned_devices()` now untracks WWIDs only after
+  verifying the local multipath device is gone.** Previously, the function
+  would `_untrack_wwid()` unconditionally after `cleanup_lun_devices()`,
+  even if cleanup failed. With the volume already deleted from the array,
+  Phase 1 cannot re-import the WWID on the next pass, so a single
+  transient cleanup failure (kpartx holder, multipathd glitch, dmsetup
+  busy) silently leaked a stale device that no future status() poll
+  could find. The fix mirrors the conditional-untrack pattern already
+  used in `free_image()` (1.1.x): if `get_multipath_device($wwid)` still
+  returns a path after cleanup, keep the WWID tracked so the next pass
+  retries; only untrack when verifiably gone.
+
+- **[LOW] `glob("/dev/disk/by-id/...")` calls now wrapped in a 5-second
+  alarm timeout in `Multipath::get_device_by_wwid()`,
+  `ISCSI::wait_for_device()`, and `ISCSI::get_device_by_serial()`.** The
+  `-b` stat that follows the glob in `get_device_by_wwid()` resolves the
+  symlink to `/dev/sd*` or `/dev/dm-*`; on a multipath device with all
+  paths down and `queue_if_no_path` still active, this stat hits the same
+  kernel block-layer wait that blocks `vgs` and `lvs`. Pattern matches
+  the existing `_run_cmd` and `sysfs_read_with_timeout` style.
+
+---
+
 ## [1.1.7] - 2026-04-11
 
 ### CRITICAL — kpartx partition holders blocked ALL volume deletions

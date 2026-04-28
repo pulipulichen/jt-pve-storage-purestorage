@@ -465,16 +465,28 @@ sub get_device_by_wwid {
     return $mpath if $mpath && -b $mpath;
 
     # Check /dev/disk/by-id (use exact suffix match to avoid substring collisions)
+    # Wrap in alarm: the -b stat resolves the symlink to /dev/sd* or /dev/dm-*,
+    # which can hang when all multipath paths are down with queue_if_no_path
+    # still active (the same kernel block-layer wait that blocks vgs/lvs).
     my $wwid_lc = lc($wwid);
-    my @devices = grep { lc(($_=~ m/-([a-f0-9]+)$/i)[0] // '') eq $wwid_lc }
-        glob("/dev/disk/by-id/wwn-*"), glob("/dev/disk/by-id/scsi-*");
-
-    if (@devices && -b $devices[0]) {
-        # Untaint the device path for taint mode compatibility
-        return _untaint_device_path($devices[0]);
+    my $found;
+    eval {
+        local $SIG{ALRM} = sub { die "timeout\n" };
+        alarm(5);
+        my @devices = grep { lc(($_=~ m/-([a-f0-9]+)$/i)[0] // '') eq $wwid_lc }
+            glob("/dev/disk/by-id/wwn-*"), glob("/dev/disk/by-id/scsi-*");
+        if (@devices && -b $devices[0]) {
+            $found = $devices[0];
+        }
+        alarm(0);
+    };
+    alarm(0);
+    if ($@ && $@ eq "timeout\n") {
+        warn "get_device_by_wwid: /dev/disk/by-id lookup for $wwid timed out after 5s\n";
+        return undef;
     }
 
-    return undef;
+    return $found ? _untaint_device_path($found) : undef;
 }
 
 # Wait for a multipath device to appear

@@ -368,11 +368,20 @@ sub wait_for_device {
 
     while ((time() - $start_time) < $timeout) {
         # Check /dev/disk/by-id for the device (exact suffix match to avoid substring collisions)
-        my @devices = grep { /\Q$serial\E$/i } glob("/dev/disk/by-id/scsi-*");
-
-        if (@devices) {
-            # Return the first matching device (untainted for taint mode)
-            return _untaint_device_path($devices[0]);
+        # Wrap in alarm to bound the glob in case devtmpfs / udev wedges.
+        my $found;
+        eval {
+            local $SIG{ALRM} = sub { die "timeout\n" };
+            alarm(5);
+            my @devices = grep { /\Q$serial\E$/i } glob("/dev/disk/by-id/scsi-*");
+            $found = $devices[0] if @devices;
+            alarm(0);
+        };
+        alarm(0);
+        if ($@ && $@ eq "timeout\n") {
+            warn "wait_for_device: /dev/disk/by-id glob timed out after 5s, retrying\n";
+        } elsif ($found) {
+            return _untaint_device_path($found);
         }
 
         # Also check multipath
@@ -424,13 +433,23 @@ sub get_device_by_serial {
     my $mpath = _find_multipath_device($serial);
     return $mpath if $mpath;  # Already untainted
 
-    # Fall back to /dev/disk/by-id (exact suffix match)
-    my @devices = grep { /\Q$serial\E$/i } glob("/dev/disk/by-id/scsi-*");
-    if (@devices) {
-        return _untaint_device_path($devices[0]);
+    # Fall back to /dev/disk/by-id (exact suffix match).
+    # Wrap in alarm to bound the glob in case devtmpfs / udev wedges.
+    my $found;
+    eval {
+        local $SIG{ALRM} = sub { die "timeout\n" };
+        alarm(5);
+        my @devices = grep { /\Q$serial\E$/i } glob("/dev/disk/by-id/scsi-*");
+        $found = $devices[0] if @devices;
+        alarm(0);
+    };
+    alarm(0);
+    if ($@ && $@ eq "timeout\n") {
+        warn "get_device_by_serial: /dev/disk/by-id glob timed out after 5s\n";
+        return undef;
     }
 
-    return undef;
+    return $found ? _untaint_device_path($found) : undef;
 }
 
 # Remove iSCSI node configuration

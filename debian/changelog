@@ -1,3 +1,36 @@
+jt-pve-storage-purestorage (1.1.8-1) stable; urgency=medium
+
+  * [MEDIUM] _cleanup_orphaned_devices() now untracks WWIDs only after
+    verifying the local multipath device is gone. Previously, the
+    function unconditionally called _untrack_wwid() after
+    cleanup_lun_devices(), even when cleanup failed. Because Phase 1
+    cannot re-import a WWID whose volume has been deleted from the
+    array, a single transient cleanup failure (kpartx holder,
+    multipathd glitch, dmsetup busy) silently leaked a stale device
+    that no future status() poll could find. The fix mirrors the
+    conditional-untrack pattern free_image() has used since 1.1.x:
+    if get_multipath_device($wwid) still returns a path after cleanup,
+    keep the WWID tracked so the next pass retries; only untrack when
+    verifiably gone.
+
+  * [LOW] glob("/dev/disk/by-id/...") calls now wrapped in a 5-second
+    alarm timeout in Multipath::get_device_by_wwid,
+    ISCSI::wait_for_device, and ISCSI::get_device_by_serial. The -b
+    stat that follows the glob in get_device_by_wwid resolves the
+    symlink to /dev/sd* or /dev/dm-*; on a multipath device with all
+    paths down and queue_if_no_path still active, this stat hits the
+    same kernel block-layer wait that blocks vgs and lvs. Pattern
+    matches existing _run_cmd / sysfs_read_with_timeout style.
+
+  * Sibling-pattern audit driven by NetApp plugin v0.2.9 fixes. Three
+    of the NetApp issues did not have a counterpart here: Pure uses
+    volume names directly as identifiers (no lookup-after-create
+    eventual consistency window); alloc_image was already a bounded
+    retry loop matching clone_image; multipath -F is already a
+    forbidden pattern.
+
+ -- Jason Cheng (Jason Tools) <jason@jason.tools>  Sat, 26 Apr 2026 12:00:00 +0800
+
 jt-pve-storage-purestorage (1.1.7-1) stable; urgency=high
 
   * [CRITICAL] is_device_in_use() treated ALL holders as "device in
