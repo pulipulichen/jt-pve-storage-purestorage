@@ -338,16 +338,85 @@ pvesm add purestorage pure1 \
     --content images,rootdir
 ```
 
-### 使用 ActiveCluster Pod 設定
+### 容量與權限隔離：Pod 與 Realm
 
+外掛透過 REST API 連接陣列，並依需求動態建立 Volume。預設情況下，
+外掛使用整台陣列的容量，且 API Token 為陣列層級權限。若要限制外掛
+可動用的範圍——無論是出於容量上限或 API 影響範圍隔離考量——
+Pure 提供兩種外掛能識別的機制。
+
+**Volume 名稱永遠採用 `pve-<storeid>-` 前綴**，因此既有陣列上不符合
+此前綴的 Volume，即使未啟用以下任何隔離選項，也不會被外掛讀取或
+寫入。
+
+#### 方案 A——Pod 加配額（任何 Purity 版本）
+
+Pod 是陣列上的命名空間。在 Pod 設定 `quota_limit` 並讓外掛指向
+此 Pod，外掛便會以 Pod 配額取代陣列總容量進行回報與管理。Volume
+名稱會自動加上 `pod::` 前綴，與 Pod 外的物件不會撞名。
+
+Pure 端：
+1. Storage > Pods > Create——名稱例如 `pve-pod`
+2. 編輯該 Pod，設定 Quota Limit（例如 `2T`）
+
+Proxmox VE 端：
 ```bash
 pvesm add purestorage pure1 \
     --pure-portal 192.168.1.100 \
     --pure-api-token xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx \
     --pure-protocol iscsi \
-    --pure-pod prod-pod \
+    --pure-pod pve-pod \
     --content images,rootdir
 ```
+
+設定後，Status 面板顯示 Pod 配額。Volume 名稱變為
+`pve-pod::pve-<storeid>-<vmid>-disk<N>`。單陣列 local Pod
+**不需要** ActiveCluster 授權；ActiveCluster 僅用於跨陣列的
+stretched Pod。
+
+#### 方案 B——Realm 加配額（Purity 6.6+）
+
+Realm 是陣列上的租戶層級隔離邊界。Volume、Snapshot、Host、
+甚至 API 看到的容量視圖都被限定在 realm 內。在 realm 內建立的
+使用者所產生的 API Token，完全看不到 realm 之外的任何東西。
+
+Pure 端：
+1. Settings > Access > Realms > Create——名稱例如 `pve-realm`，
+   設定 Quota Limit（例如 `2T`）
+2. Settings > Access > Users > Create——使用者 `pve-plugin`、
+   Realm `pve-realm`、Role `storage_admin`
+3. 點 `pve-plugin` > API Tokens > Create
+
+Proxmox VE 端：直接使用此 realm-scoped Token，**外掛沒有任何
+選項要設**——範圍由 Token 本身強制執行。
+
+```bash
+pvesm add purestorage pure1 \
+    --pure-portal 192.168.1.100 \
+    --pure-api-token <realm-scoped-token> \
+    --pure-protocol iscsi \
+    --content images,rootdir
+```
+
+#### 兩者比較
+
+| 比較項目 | Pod | Realm |
+|---------|-----|-------|
+| 容量限制 | 有（Pod 上的 `quota_limit`） | 有（Realm 上的 `quota_limit`） |
+| 命名隔離 | 有（`pod::` 前綴） | 有（不同 realm 之間名稱獨立） |
+| 權限隔離 | 無——Token 仍看得到其他 Pod | 有——Token 只看得到自己的 realm |
+| 外掛需設定的選項 | `--pure-pod <name>` | 無（Token 本身就限定了） |
+| Volume 名稱格式 | `pve-pod::pve-...` | `pve-...` |
+| Purity 版本需求 | 任意版本 | 6.6+ |
+
+若版本支援，Realm 是比較乾淨的選擇——它在單一機制中同時隔離容量
+與權限。在較舊的 Purity 上，Pod 是唯一外掛能識別的容量機制；
+Pod 的 `quota_limit` 仍會給你硬上限，雖然 API Token 本身仍是
+陣列層級的權限。
+
+如果兩種都不設定，外掛就會使用整台陣列、Status 面板回報陣列總容量。
+外掛只會讀寫名稱以 `pve-<storeid>-` 開頭的 Volume，因此不符合此
+命名規則的既有 Volume 在任何設定下都不會被動到。
 
 ### 設定選項
 
@@ -362,7 +431,8 @@ pvesm add purestorage pure1 \
 | `pure-host-mode` | 否 | per-node | Host 模式：`per-node` 或 `shared` |
 | `pure-cluster-name` | 否 | pve | 用於 Host 命名的叢集名稱 |
 | `pure-device-timeout` | 否 | 60 | 裝置探索逾時秒數 |
-| `pure-pod` | 否 | - | ActiveCluster Pod 名稱（用於同步複製） |
+| `pure-portal-probe-timeout` | 否 | 2 | iscsiadm 之前對每個 portal 的 TCP 預探測逾時秒數，設為 0 停用 |
+| `pure-pod` | 否 | - | Pod 名稱（見「容量與權限隔離」一節）。設定後容量回報以 Pod 配額為準，所有 Volume 名稱進入 Pod 命名空間 |
 | `content` | 是 | - | 內容類型：`images`、`rootdir` |
 
 \* 需提供 `pure-api-token` 或同時提供 `pure-username` 和 `pure-password`。

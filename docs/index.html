@@ -797,12 +797,16 @@
                     <span class="lang-en">(none)</span>
                     <span class="lang-zh">（無）</span>
                 </td><td>
-                    <span class="lang-en">ActiveCluster pod name. Volumes will be created inside this pod for synchronous replication.</span>
-                    <span class="lang-zh">ActiveCluster pod 名稱。Volume 會建立在此 pod 內，提供同步複寫。</span>
+                    <span class="lang-en">Pod name. Setting this scopes the plugin to the pod: capacity reporting follows the pod's <code>quota_limit</code>, and Volume names are namespaced as <code>pod::pve-...</code>. See <a href="#isolation">Capacity and Permission Isolation</a>.</span>
+                    <span class="lang-zh">Pod 名稱。設定後外掛會綁定該 pod：容量回報以 pod 的 <code>quota_limit</code> 為準，Volume 名稱進入 <code>pod::pve-...</code> 命名空間。請見<a href="#isolation">容量與權限隔離</a>。</span>
                 </td></tr>
                 <tr><td><code>pure-device-timeout</code></td><td><code>60</code></td><td>
                     <span class="lang-en">Device discovery timeout in seconds</span>
                     <span class="lang-zh">裝置探索逾時秒數</span>
+                </td></tr>
+                <tr><td><code>pure-portal-probe-timeout</code></td><td><code>2</code></td><td>
+                    <span class="lang-en">TCP pre-check timeout per iSCSI portal before iscsiadm discovery/login. Skips unreachable portals fast instead of stalling 30s+60s each. Set to 0 to disable. Raise on high-latency storage networks.</span>
+                    <span class="lang-zh">iscsiadm 之前對每個 iSCSI portal 的 TCP 預探測逾時秒數。可快速跳過無法連通的 portal，避免每個各吃 30 秒（discovery）+ 60 秒（login）的逾時。設為 0 停用。儲存網路延遲偏高時可調大。</span>
                 </td></tr>
             </tbody>
         </table>
@@ -855,6 +859,164 @@
             </tbody>
         </table>
     </div>
+
+    <h3 class="subsection-title" id="isolation">
+        <span class="lang-en">Capacity and Permission Isolation: Pod and Realm</span>
+        <span class="lang-zh">容量與權限隔離：Pod 與 Realm</span>
+    </h3>
+    <p>
+        <span class="lang-en">The plugin connects to the array via REST API and creates Volumes on demand. By default it uses the entire array's capacity and an array-wide API token. To bound what the plugin can touch -- both for capacity caps and for API blast-radius isolation -- Pure offers two mechanisms the plugin honours.</span>
+        <span class="lang-zh">外掛透過 REST API 連接陣列，並依需求動態建立 Volume。預設情況下，外掛使用整台陣列的容量，且 API Token 為陣列層級權限。若要限制外掛可動用的範圍——無論是出於容量上限或 API 影響範圍隔離考量——Pure 提供兩種外掛能識別的機制。</span>
+    </p>
+    <p>
+        <span class="lang-en"><strong>Volume names always use the <code>pve-&lt;storeid&gt;-</code> prefix</strong>, so existing array Volumes that do NOT match this prefix are never read or written by the plugin even without any of the isolation options below.</span>
+        <span class="lang-zh"><strong>Volume 名稱永遠採用 <code>pve-&lt;storeid&gt;-</code> 前綴</strong>，因此既有陣列上不符合此前綴的 Volume，即使未啟用以下任何隔離選項，也不會被外掛讀取或寫入。</span>
+    </p>
+
+    <h4 class="subsection-title">
+        <span class="lang-en">Option A -- Pod with quota (any Purity version)</span>
+        <span class="lang-zh">方案 A——Pod 加配額（任何 Purity 版本）</span>
+    </h4>
+    <p>
+        <span class="lang-en">A Pod is a namespace on the array. Set a <code>quota_limit</code> on the Pod and point the plugin at it; the plugin then reports and enforces the Pod's quota instead of the array total. Volume names get a <code>pod::</code> prefix so they cannot collide with anything outside the Pod.</span>
+        <span class="lang-zh">Pod 是陣列上的命名空間。在 Pod 設定 <code>quota_limit</code> 並讓外掛指向此 Pod，外掛便會以 Pod 配額取代陣列總容量進行回報與管理。Volume 名稱會自動加上 <code>pod::</code> 前綴，與 Pod 外的物件不會撞名。</span>
+    </p>
+    <p>
+        <span class="lang-en">On Pure: Storage &gt; Pods &gt; Create (e.g. <code>pve-pod</code>), then edit the Pod and set <code>Quota Limit</code> (e.g. <code>2T</code>).</span>
+        <span class="lang-zh">Pure 端：Storage &gt; Pods &gt; Create（名稱例如 <code>pve-pod</code>），編輯該 Pod 並設定 <code>Quota Limit</code>（例如 <code>2T</code>）。</span>
+    </p>
+    <p>
+        <span class="lang-en">On Proxmox VE:</span>
+        <span class="lang-zh">Proxmox VE 端：</span>
+    </p>
+    <pre><span class="cmd">pvesm</span> add purestorage pure1 \
+    <span class="flag">--pure-portal</span> <span class="string">192.168.1.100</span> \
+    <span class="flag">--pure-api-token</span> <span class="string">'xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx'</span> \
+    <span class="flag">--pure-protocol</span> iscsi \
+    <span class="flag">--pure-pod</span> <span class="string">pve-pod</span> \
+    <span class="flag">--content</span> images,rootdir \
+    <span class="flag">--shared</span> 1</pre>
+    <p>
+        <span class="lang-en">Single-array (local) Pods do <strong>not</strong> require an ActiveCluster license; ActiveCluster is only needed for stretched (cross-array) Pods.</span>
+        <span class="lang-zh">單陣列 local Pod <strong>不需要</strong> ActiveCluster 授權；ActiveCluster 僅用於跨陣列的 stretched Pod。</span>
+    </p>
+
+    <h4 class="subsection-title">
+        <span class="lang-en">Option B -- Realm with quota (Purity 6.6+)</span>
+        <span class="lang-zh">方案 B——Realm 加配額（Purity 6.6+）</span>
+    </h4>
+    <p>
+        <span class="lang-en">A Realm is a tenant-level isolation boundary on the array. Volumes, snapshots, hosts, and the API capacity view are all scoped to the realm. An API token created for a user inside the realm has no visibility into anything outside.</span>
+        <span class="lang-zh">Realm 是陣列上的租戶層級隔離邊界。Volume、Snapshot、Host、甚至 API 看到的容量視圖都被限定在 realm 內。在 realm 內建立的使用者所產生的 API Token，完全看不到 realm 之外的任何東西。</span>
+    </p>
+    <p>
+        <span class="lang-en">On Pure:</span>
+        <span class="lang-zh">Pure 端：</span>
+    </p>
+    <ol>
+        <li>
+            <span class="lang-en">Settings &gt; Access &gt; Realms &gt; Create -- name e.g. <code>pve-realm</code>, set <code>Quota Limit</code> (e.g. <code>2T</code>)</span>
+            <span class="lang-zh">Settings &gt; Access &gt; Realms &gt; Create——名稱例如 <code>pve-realm</code>，設定 <code>Quota Limit</code>（例如 <code>2T</code>）</span>
+        </li>
+        <li>
+            <span class="lang-en">Settings &gt; Access &gt; Users &gt; Create -- username <code>pve-plugin</code>, realm <code>pve-realm</code>, role <code>storage_admin</code></span>
+            <span class="lang-zh">Settings &gt; Access &gt; Users &gt; Create——使用者 <code>pve-plugin</code>、Realm <code>pve-realm</code>、Role <code>storage_admin</code></span>
+        </li>
+        <li>
+            <span class="lang-en">Open <code>pve-plugin</code> &gt; API Tokens &gt; Create</span>
+            <span class="lang-zh">點 <code>pve-plugin</code> &gt; API Tokens &gt; Create</span>
+        </li>
+    </ol>
+    <p>
+        <span class="lang-en">On Proxmox VE: just use the realm-scoped token. <strong>No plugin option to set</strong> -- the scoping is enforced by the token itself.</span>
+        <span class="lang-zh">Proxmox VE 端：直接使用此 realm-scoped Token，<strong>外掛沒有任何選項要設</strong>——範圍由 Token 本身強制執行。</span>
+    </p>
+    <pre><span class="cmd">pvesm</span> add purestorage pure1 \
+    <span class="flag">--pure-portal</span> <span class="string">192.168.1.100</span> \
+    <span class="flag">--pure-api-token</span> <span class="string">'&lt;realm-scoped-token&gt;'</span> \
+    <span class="flag">--pure-protocol</span> iscsi \
+    <span class="flag">--content</span> images,rootdir \
+    <span class="flag">--shared</span> 1</pre>
+
+    <h4 class="subsection-title">
+        <span class="lang-en">Choosing between them</span>
+        <span class="lang-zh">兩者比較</span>
+    </h4>
+    <div class="table-wrap">
+        <table>
+            <thead><tr>
+                <th>
+                    <span class="lang-en">&nbsp;</span>
+                    <span class="lang-zh">比較項目</span>
+                </th>
+                <th>Pod</th>
+                <th>Realm</th>
+            </tr></thead>
+            <tbody>
+                <tr><td>
+                    <span class="lang-en">Capacity limit</span>
+                    <span class="lang-zh">容量限制</span>
+                </td><td>
+                    <span class="lang-en">Yes (<code>quota_limit</code> on Pod)</span>
+                    <span class="lang-zh">有（Pod 上的 <code>quota_limit</code>）</span>
+                </td><td>
+                    <span class="lang-en">Yes (<code>quota_limit</code> on Realm)</span>
+                    <span class="lang-zh">有（Realm 上的 <code>quota_limit</code>）</span>
+                </td></tr>
+                <tr><td>
+                    <span class="lang-en">Naming isolation</span>
+                    <span class="lang-zh">命名隔離</span>
+                </td><td>
+                    <span class="lang-en">Yes (<code>pod::</code> prefix)</span>
+                    <span class="lang-zh">有（<code>pod::</code> 前綴）</span>
+                </td><td>
+                    <span class="lang-en">Yes (cross-realm names independent)</span>
+                    <span class="lang-zh">有（不同 realm 之間名稱獨立）</span>
+                </td></tr>
+                <tr><td>
+                    <span class="lang-en">Permission isolation</span>
+                    <span class="lang-zh">權限隔離</span>
+                </td><td>
+                    <span class="lang-en">No -- token still sees other Pods</span>
+                    <span class="lang-zh">無——Token 仍看得到其他 Pod</span>
+                </td><td>
+                    <span class="lang-en">Yes -- token sees only its realm</span>
+                    <span class="lang-zh">有——Token 只看得到自己的 realm</span>
+                </td></tr>
+                <tr><td>
+                    <span class="lang-en">Plugin option needed</span>
+                    <span class="lang-zh">外掛需設定的選項</span>
+                </td><td>
+                    <code>--pure-pod &lt;name&gt;</code>
+                </td><td>
+                    <span class="lang-en">None (token enforces)</span>
+                    <span class="lang-zh">無（Token 本身就限定了）</span>
+                </td></tr>
+                <tr><td>
+                    <span class="lang-en">Volume name format</span>
+                    <span class="lang-zh">Volume 名稱格式</span>
+                </td><td>
+                    <code>pve-pod::pve-...</code>
+                </td><td>
+                    <code>pve-...</code>
+                </td></tr>
+                <tr><td>
+                    <span class="lang-en">Purity version</span>
+                    <span class="lang-zh">Purity 版本需求</span>
+                </td><td>
+                    <span class="lang-en">Any</span>
+                    <span class="lang-zh">任意版本</span>
+                </td><td>
+                    <span class="lang-en">6.6+</span>
+                    <span class="lang-zh">6.6+</span>
+                </td></tr>
+            </tbody>
+        </table>
+    </div>
+    <p>
+        <span class="lang-en">Realm is the cleaner choice when available -- it isolates capacity AND permissions in a single mechanism. On older Purity, Pod is the only built-in mechanism the plugin recognises for capacity reporting; the Pod's <code>quota_limit</code> still gives you a hard capacity cap that the plugin honours, even though API tokens remain array-wide.</span>
+        <span class="lang-zh">若版本支援，Realm 是比較乾淨的選擇——它在單一機制中同時隔離容量與權限。在較舊的 Purity 上，Pod 是唯一外掛能識別的容量機制；Pod 的 <code>quota_limit</code> 仍會給你硬上限，雖然 API Token 本身仍是陣列層級的權限。</span>
+    </p>
 
     <h3 class="subsection-title">
         <span class="lang-en">Example storage.cfg (iSCSI, API token)</span>

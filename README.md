@@ -351,16 +351,90 @@ pvesm add purestorage pure1 \
     --content images,rootdir
 ```
 
-### Setup with ActiveCluster Pod
+### Capacity and Permission Isolation: Pod and Realm
 
+The plugin connects to the array via REST API and creates Volumes on
+demand. By default it uses the entire array's capacity and an
+array-wide API token. To bound what the plugin can touch — both for
+capacity caps and for API blast-radius isolation — Pure offers two
+mechanisms the plugin honours.
+
+**Volume names always use the `pve-<storeid>-` prefix**, so existing
+array Volumes that do NOT match this prefix are never read or written
+by the plugin even without any of the isolation options below.
+
+#### Option A — Pod with quota (any Purity version)
+
+A Pod is a namespace on the array. Set a `quota_limit` on the Pod and
+point the plugin at it; the plugin then reports and enforces the
+Pod's quota instead of the array total. Volume names get a `pod::`
+prefix so they cannot collide with anything outside the Pod.
+
+On Pure:
+1. Storage > Pods > Create — name e.g. `pve-pod`
+2. Edit the Pod > set Quota Limit (e.g. `2T`)
+
+On Proxmox VE:
 ```bash
 pvesm add purestorage pure1 \
     --pure-portal 192.168.1.100 \
     --pure-api-token xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx \
     --pure-protocol iscsi \
-    --pure-pod prod-pod \
+    --pure-pod pve-pod \
     --content images,rootdir
 ```
+
+The Status panel will report the Pod's quota. Volume names become
+`pve-pod::pve-<storeid>-<vmid>-disk<N>`. Single-array (local) Pods do
+**not** require an ActiveCluster license; ActiveCluster is only needed
+for stretched (cross-array) Pods.
+
+#### Option B — Realm with quota (Purity 6.6+)
+
+A Realm is a tenant-level isolation boundary on the array. Volumes,
+snapshots, hosts, and the API capacity view are all scoped to the
+realm. An API token created for a user inside the realm has no
+visibility into anything outside.
+
+On Pure:
+1. Settings > Access > Realms > Create — name e.g. `pve-realm`,
+   set Quota Limit (e.g. `2T`)
+2. Settings > Access > Users > Create — username `pve-plugin`,
+   realm `pve-realm`, role `storage_admin`
+3. Open `pve-plugin` > API Tokens > Create
+
+On Proxmox VE: just use the realm-scoped token. **No plugin option to
+set** — the scoping is enforced by the token itself.
+
+```bash
+pvesm add purestorage pure1 \
+    --pure-portal 192.168.1.100 \
+    --pure-api-token <realm-scoped-token> \
+    --pure-protocol iscsi \
+    --content images,rootdir
+```
+
+#### Choosing between them
+
+| | Pod | Realm |
+|---|-----|-------|
+| Capacity limit | Yes (`quota_limit` on Pod) | Yes (`quota_limit` on Realm) |
+| Naming isolation | Yes (`pod::` prefix) | Yes (cross-realm names independent) |
+| Permission isolation | No — token still sees other Pods | Yes — token sees only its realm |
+| Plugin option needed | `--pure-pod <name>` | None (token enforces) |
+| Volume name format | `pve-pod::pve-...` | `pve-...` |
+| Purity version | Any | 6.6+ |
+
+Realm is the cleaner choice when available — it isolates capacity AND
+permissions in a single mechanism. On older Purity, Pod is the only
+built-in mechanism the plugin recognises for capacity reporting; the
+Pod's `quota_limit` still gives you a hard capacity cap that the
+plugin honours, even though API tokens remain array-wide.
+
+If neither is set, the plugin uses the entire array and the Status
+panel reports the array's total capacity. The plugin only reads or
+writes Volumes whose name starts with `pve-<storeid>-`, so volumes
+named outside that pattern remain untouched in any configuration.
 
 ### Configuration Options
 
@@ -375,7 +449,8 @@ pvesm add purestorage pure1 \
 | `pure-host-mode` | No | per-node | Host mode: `per-node` or `shared` |
 | `pure-cluster-name` | No | pve | Cluster name for host naming |
 | `pure-device-timeout` | No | 60 | Device discovery timeout in seconds |
-| `pure-pod` | No | - | ActiveCluster Pod name for synchronous replication |
+| `pure-portal-probe-timeout` | No | 2 | TCP pre-check timeout per portal before iscsiadm. Set to 0 to disable. |
+| `pure-pod` | No | - | Pod name (see Capacity and Permission Isolation). Sets capacity reporting to the Pod's quota and namespaces all Volume names. |
 | `content` | Yes | - | Content types: `images`, `rootdir` |
 
 \* Either `pure-api-token` or both `pure-username` and `pure-password` are required.
