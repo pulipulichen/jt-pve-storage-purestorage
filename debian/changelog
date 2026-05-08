@@ -1,3 +1,54 @@
+jt-pve-storage-purestorage (1.1.10-1) stable; urgency=medium
+
+  * [MEDIUM] Pod quota capacity reporting was broken: when the storage
+    was configured with --pure-pod, status() always reported the FULL
+    FlashArray capacity instead of the pod's quota. Pure FlashArray
+    API 2.x exposes pod quotas through TWO mechanisms and the old
+    code missed both common variants:
+    (a) The Pod object itself has a quota_limit field set via
+        purepod create --quota-limit / setattr --quota-limit (Purity
+        6.4.4+ CLI). The old code read this — but it remains 0 when
+        the cap is set via mechanism (b) below.
+    (b) Newer Purity also lets the operator create a Policy of
+        policy_type=quota that references the pod via the policy's
+        own 'pod' field, with one or more Rules in
+        /policies/quota/rules carrying the actual quota_limit. The
+        Storage > Policies GUI builds quotas this way, and it does
+        NOT propagate the cap back into the Pod's own quota_limit.
+        So reading the Pod object alone always saw 0.
+    Old code therefore always saw quota=0 and fell through to
+    array_space(). Field reproducer: Purity//FA 6.5.9 with a quota
+    policy 'pvepodquota' (2 TB rule) on pod 'pvepod' showed up in
+    PVE as the array's full multi-TB capacity. Fixed by walking both
+    paths: read the Pod's own quota_limit, then GET /policies/quota
+    filtered by pod.name to find policy-based caps, then GET
+    /policies/quota/rules to pull the rule limits. Take the smallest
+    positive value across all sources — most-restrictive cap matches
+    what the array itself enforces. Edge cases handled: multiple
+    rules/policies per pod (min); enabled=false / destroyed
+    policies (skipped); enforced=false soft rules (still counted, so
+    PVE allocation respects user intent); endpoint 404 / 403 / 400
+    on older Purity (no-filter fallback then warn + array fallback);
+    pod names with quote/backslash chars (skipped); API 1.x (skipped).
+    All failure paths fall back to array capacity with a warning,
+    never croak — status() polling must not break on quota lookup.
+    Earlier draft of this fix used /policies/quota/members which is
+    WRONG for pods (per Pure API 2.26 spec, that membership table
+    binds policies to managed directories only). Verified against the
+    FA 2.26 OpenAPI spec at code.purestorage.com.
+
+  * Pod 'used' capacity now derived from total_provisioned (the metric
+    Pure quotas actually count against, per the FA 2.26 Pod space
+    schema) instead of total_used (post-reduction physical bytes).
+    Falls back to virtual / total_used / total_physical when
+    total_provisioned is absent on older Purity. Without this change,
+    a freshly-provisioned 2 T volume in a 2 T pod showed PVE 0% used
+    while the pod was already 100% full from the array's perspective;
+    the next allocation would have been rejected by the array even
+    though PVE thought there was 2 T free.
+
+ -- Jason Cheng (Jason Tools) <jason@jason.tools>  Fri, 08 May 2026 00:00:00 +0800
+
 jt-pve-storage-purestorage (1.1.9-1) stable; urgency=high
 
   * [HIGH] activate_storage() now TCP-probes every iSCSI portal returned

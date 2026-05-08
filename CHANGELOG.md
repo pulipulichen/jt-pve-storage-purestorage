@@ -8,6 +8,96 @@ this project adheres to a `MAJOR.MINOR.PATCH-DEBIAN` versioning scheme.
 
 ---
 
+## [1.1.10] - 2026-05-08
+
+### MEDIUM — Pod quota was ignored, full-array capacity reported instead
+
+When a Pure storage was created with `--pure-pod <name>`, PVE's storage
+status panel showed the **entire FlashArray capacity** rather than the
+pod's quota. A 2 TB pod quota on a 50 TB array displayed 50 TB free,
+hiding the real allocation ceiling and giving operators no warning
+before the array rejected an over-quota volume create.
+
+Pure FlashArray exposes pod quotas through TWO mechanisms in API 2.x,
+and the old code missed both common variants:
+
+- **(a)** The Pod object itself carries a `quota_limit` field, set
+  via the `purepod create --quota-limit` /
+  `purepod setattr --quota-limit` CLI path (Purity 6.4.4+). The old
+  code read this correctly **but** the field stays at `0` when the
+  cap is set by the policy mechanism (b) below — which is the path
+  the GUI uses.
+- **(b)** Newer Purity also lets the operator create a Policy of
+  `policy_type='quota'` that references the pod via the policy's
+  `pod` field, with one or more Rules in `/policies/quota/rules`
+  carrying the actual `quota_limit`. The Storage > Policies UI
+  builds quotas this way. **Crucially, the policy mechanism does
+  NOT propagate the cap back into the Pod's own `quota_limit`
+  field** — so reading the Pod object alone always saw `0`.
+
+Old code therefore always saw `quota = 0`, fell through the
+`if (quota > 0)` guard, and returned the array-wide capacity from
+`array_space()`.
+
+> ⚠ Earlier drafts of this fix attempted to use
+> `/policies/quota/members` with a `member.resource_type='pods'`
+> filter. That endpoint is **wrong for pods** — per the Pure API
+> 2.26 spec, the members table binds quota policies to **managed
+> directories** only. Pod-attached quota policies are discovered by
+> reading the policy's own `pod` field instead.
+
+Field reproducer: Purity//FA 6.5.9, pod `pvepod` with a single
+quota policy `pvepodquota` (2 TB rule, enabled, enforced=false),
+one 2 T volume already provisioned. PVE reported the full multi-TB
+array capacity with 0% used.
+
+#### Fixed
+- **[MEDIUM] `get_managed_capacity()` now resolves pod quotas via
+  both code paths.** New helper `API::pod_get_quota_limit($podname)`:
+  1. Read `quota_limit` directly off the Pod object (path a)
+  2. `GET /policies/quota?filter=pod.name='X'` — list quota policies
+     whose `pod` field references this pod (path b)
+  3. `GET /policies/quota/rules?policy_names=Y,Z` — gather rules for
+     those policies (uses the dedicated `policy_names` array query
+     parameter documented in the FA 2.26 spec, not an `or`-joined
+     filter)
+  4. Take the **smallest positive `quota_limit`** across (a) and all
+     rules from (b) — most-restrictive cap matches what the array
+     itself enforces on allocation
+- Edge cases handled:
+  - Multiple rules per policy / multiple policies per pod → take min
+  - Policies with `enabled=false` or `destroyed=true` → ignored
+  - Rules with `enforced=false` (soft / notification-only) → still
+    counted, because the user explicitly created the quota and PVE
+    allocation should respect that intent
+  - Filter parameter unsupported on older Purity for these endpoints
+    → fall back to no-filter list + Perl-side match
+  - Endpoint 404 (missing on older Purity), 403 (permission-restricted
+    token), 400 (filter-syntax mismatch) → warn + fall through to
+    array capacity (status polling never croaks)
+  - Pod name with `'` or `\` (would break the filter literal) →
+    skipped with warning
+  - API 1.x → skipped (pods quotas are an API 2.x feature)
+- **Pod `used` capacity now derived from `total_provisioned`** (the
+  metric Pure quotas actually count against, per the API 2.26 Pod
+  space schema) instead of `total_used` (post-data-reduction physical
+  bytes). Falls back to `virtual` / `total_used` / `total_physical`
+  for older Purity that may omit `total_provisioned`. Without this
+  change, a freshly-provisioned 2 T volume in a 2 T pod showed 0%
+  used in PVE even though the pod was already 100% full from the
+  array's perspective — the next allocate would have been rejected.
+
+#### Files changed
+- `lib/PVE/Storage/Custom/PureStorage/API.pm`:
+  - `pod_get_quota_limit()` — new helper, reads pod's own
+    `quota_limit` AND walks `policies/quota` + `policies/quota/rules`
+    with eval-wrapped error handling at every API call and a
+    no-filter fallback
+  - `get_managed_capacity()` — call new helper; switch `used`
+    source to `total_provisioned`
+
+---
+
 ## [1.1.9] - 2026-05-05
 
 ### CRITICAL — unreachable iSCSI portals stalled activate_storage() and wedged the web UI

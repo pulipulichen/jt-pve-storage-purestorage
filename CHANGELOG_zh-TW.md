@@ -8,6 +8,82 @@
 
 ---
 
+## [1.1.10] - 2026-05-08
+
+### 中——Pod 配額（Quota）被忽略，容量回報跑成整個 FlashArray
+
+當 Storage 以 `--pure-pod <name>` 建立時，PVE 儲存狀態面板顯示的容量是
+**整個 FlashArray 全容量**，而不是該 Pod 的配額。例如 50 TB 陣列上設了
+2 TB Pod 配額，PVE 顯示為 50 TB 全可用，操作者無從在配額用盡前得到任何
+警示，直到陣列拒絕超量的 Volume 建立才會發現。
+
+Pure FlashArray API 2.x 的 Pod 配額有**兩種設定路徑**，舊版程式碼
+兩種常見情況都漏掉了：
+
+- **(a)** Pod 物件本身有一個 `quota_limit` 欄位，由
+  `purepod create --quota-limit` 或 `purepod setattr --quota-limit`
+  CLI 設定（Purity 6.4.4+ 起）。舊版程式碼有讀這個欄位，**但**當配額
+  是用下面的 Policy 機制 (b) 設定時，這個欄位會永遠保持 0——而 GUI
+  走的就是 Policy 機制這條路。
+- **(b)** 較新的 Purity 還允許建立 `policy_type='quota'` 的 Policy，
+  Policy 物件本身有一個 `pod` 欄位指到對應的 Pod；真正的
+  `quota_limit` 由 `/policies/quota/rules` 上的 Rule 攜帶。
+  Storage > Policies UI 走的就是這條路。**重點是這個機制不會把
+  cap 寫回 Pod 的 `quota_limit` 欄位**——只讀 Pod 物件永遠看到 0。
+
+原本的程式因此永遠拿到 `quota = 0`，直接走 `if (quota > 0)` 之後的
+fallback 分支，回傳 `array_space()` 給的全陣列容量。
+
+> ⚠ 本修正最初的草稿曾試圖用 `/policies/quota/members` 並加上
+> `member.resource_type='pods'` filter——這對 pod 是**錯的**：依
+> Pure API 2.26 spec，這個 members 表只用於將 quota policy 綁到
+> **managed directory**。Pod 配額 policy 的關聯是讀 policy 物件
+> 自己的 `pod` 欄位來判斷。
+
+實際重現環境：Purity//FA 6.5.9，Pod `pvepod` 上掛了一個 quota policy
+`pvepodquota`（2 TB rule、enabled、enforced=false），Pod 內已有一個 2 T
+Volume。PVE 顯示為陣列全容量、used 0%。
+
+#### 修正
+- **[中] `get_managed_capacity()` 改為兩種設定路徑都查。**
+  新增 helper `API::pod_get_quota_limit($podname)`：
+  1. 讀 Pod 物件本身的 `quota_limit`（路徑 a）
+  2. `GET /policies/quota?filter=pod.name='X'` —— 列出 `pod` 欄位
+     指到本 Pod 的所有 quota policy（路徑 b）
+  3. `GET /policies/quota/rules?policy_names=Y,Z` —— 取得這些 policy
+     的所有 rule（使用 FA 2.26 spec 文件化的 `policy_names` array
+     參數，不再用 `or` 串接的 filter）
+  4. 在 (a) 與 (b) 所有 rule 之中取**最小的正值 `quota_limit`**——
+     最嚴格的 cap 與陣列實際強制配額時的判斷一致
+- 處理的邊界情境：
+  - 一個 policy 多 rule、一個 Pod 多 policy → 全部一起比，取最小
+  - `enabled=false` 或 `destroyed=true` 的 policy → 整個忽略
+  - `enforced=false`（軟性、僅通知）rule → 仍計入，使用者既然刻意
+    建立了配額，PVE 配置決策就應尊重該意圖
+  - 舊版 Purity 對這幾個端點不支援 filter 參數 → 改用無 filter
+    列舉 + Perl 端比對
+  - 端點 404（舊版 Purity 沒這端點）、權限 token 403、filter 語法
+    不支援 400 → warning + fall through 回全陣列容量（status() 輪詢
+    絕不 croak）
+  - Pod 名稱含 `'` 或 `\`（會破壞 filter 字面量）→ 跳過並 warning
+  - API 1.x → 跳過（Pod 配額為 API 2.x 才有的功能）
+- **Pod `used` 容量改用 `total_provisioned`**（依 API 2.26 Pod
+  space schema，這是 Pure 配額實際計量的指標），取代原本的
+  `total_used`（資料縮減後的實體用量）。當 `total_provisioned`
+  不存在時依序回退到 `virtual` / `total_used` / `total_physical`。
+  原本邏輯下，2 T Pod 內剛建一個 2 T Volume，PVE 仍會顯示 used 0%，
+  但陣列端其實已經 100% 滿——下一次配置就會被陣列拒絕。
+
+#### 變更檔案
+- `lib/PVE/Storage/Custom/PureStorage/API.pm`：
+  - `pod_get_quota_limit()` —— 新 helper，同時讀取 Pod 物件本身的
+    `quota_limit` 並巡訪 `policies/quota` 與 `policies/quota/rules`，
+    每一個 API 呼叫都用 eval 包覆錯誤處理且帶無 filter fallback
+  - `get_managed_capacity()` —— 改呼叫新 helper；`used` 改採
+    `total_provisioned`
+
+---
+
 ## [1.1.9] - 2026-05-05
 
 ### 嚴重——無法連通的 iSCSI portal 會卡住 activate_storage() 並讓 Web UI 整個轉圈

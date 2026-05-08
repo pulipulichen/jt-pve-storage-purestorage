@@ -541,7 +541,7 @@
                 <span class="lang-en">Install the plugin package</span>
                 <span class="lang-zh">安裝 plugin 套件</span>
             </div>
-            <pre><span class="cmd">dpkg</span> <span class="flag">-i</span> jt-pve-storage-purestorage_1.1.9-1_all.deb</pre>
+            <pre><span class="cmd">dpkg</span> <span class="flag">-i</span> jt-pve-storage-purestorage_1.1.10-1_all.deb</pre>
             <p>
                 <span class="lang-en">The plugin automatically writes <code>/etc/multipath/conf.d/pure-storage.conf</code> with Pure-recommended settings, detects dangerous existing multipath.conf settings, and reloads Proxmox VE services (pvedaemon, pvestatd, pveproxy) via SIGHUP.</span>
                 <span class="lang-zh">Plugin 會自動寫入 <code>/etc/multipath/conf.d/pure-storage.conf</code>（採 Pure 推薦設定）、偵測 multipath.conf 危險設定，並透過 SIGHUP 重新載入 Proxmox VE 服務（pvedaemon、pvestatd、pveproxy）。</span>
@@ -621,7 +621,7 @@
                 <span class="lang-en">Install new package</span>
                 <span class="lang-zh">安裝新套件</span>
             </div>
-            <pre><span class="cmd">dpkg</span> <span class="flag">-i</span> jt-pve-storage-purestorage_1.1.9-1_all.deb</pre>
+            <pre><span class="cmd">dpkg</span> <span class="flag">-i</span> jt-pve-storage-purestorage_1.1.10-1_all.deb</pre>
         </div>
     </div>
     <div class="step">
@@ -1979,6 +1979,15 @@ global_filter = [ <span class="string">"r|/dev/mapper/3624a9370.*|"</span>, <spa
         <span class="lang-en">Version history. For full details see <a href="https://github.com/jasoncheng7115/jt-pve-storage-purestorage/blob/main/CHANGELOG.md">CHANGELOG.md</a>.</span>
         <span class="lang-zh">版本紀錄。完整內容請參閱 <a href="https://github.com/jasoncheng7115/jt-pve-storage-purestorage/blob/main/CHANGELOG_zh-TW.md">CHANGELOG_zh-TW.md</a>。</span>
     </p>
+
+    <div class="changelog-entry">
+        <div class="changelog-version">v1.1.10 <span class="changelog-tag changelog-tag--fix">Fix</span></div>
+        <div class="changelog-date">2026-05-08</div>
+        <div class="changelog-summary">
+            <span class="lang-en">Pod Quota Capacity Reporting Fix. When the storage was created with <code>--pure-pod &lt;name&gt;</code>, PVE always reported the FULL FlashArray capacity instead of the pod's quota. Pure FlashArray API 2.x exposes pod quotas through two mechanisms: (a) the Pod object's own <code>quota_limit</code> field set via <code>purepod --quota-limit</code> CLI, and (b) Policy objects of <code>policy_type=quota</code> that reference the pod through their <code>pod</code> field, with rules in <code>/policies/quota/rules</code>. The GUI uses (b) and does NOT propagate the cap back to (a), so the old code always saw <code>quota_limit = 0</code> on the pod and fell through to array capacity. New helper <code>pod_get_quota_limit()</code> reads both paths and takes the smallest positive limit. Pod <code>used</code> switched from <code>total_used</code> to <code>total_provisioned</code> (the metric Pure quotas actually count against, per the FA 2.26 spec). Verified against the FA 2.26 OpenAPI spec — <code>/policies/quota/members</code> is for managed directories, NOT pods.</span>
+            <span class="lang-zh">Pod 配額容量回報修復。Storage 以 <code>--pure-pod &lt;name&gt;</code> 建立時，PVE 一律顯示整個 FlashArray 全容量，而非該 Pod 的配額。Pure FlashArray API 2.x 對 Pod 配額有兩種設定路徑：(a) Pod 物件本身的 <code>quota_limit</code> 欄位，由 <code>purepod --quota-limit</code> CLI 設定；(b) <code>policy_type=quota</code> 的 Policy 物件透過自身的 <code>pod</code> 欄位指到 Pod，<code>quota_limit</code> 則由 <code>/policies/quota/rules</code> 攜帶。GUI 走的是 (b) 而且不會把 cap 寫回 (a)，所以舊版程式只讀 Pod 物件永遠看到 <code>quota_limit = 0</code>，於是 fall through 到全陣列容量。新 helper <code>pod_get_quota_limit()</code> 兩條路徑都查並取最小的正值。Pod <code>used</code> 改用 <code>total_provisioned</code>（依 FA 2.26 spec，Pure 配額實際計量的指標）。已對照 FA 2.26 OpenAPI spec 驗證——<code>/policies/quota/members</code> 是給 managed directory 用的，不是 Pod。</span>
+        </div>
+    </div>
 
     <div class="changelog-entry">
         <div class="changelog-version">v1.1.9 <span class="changelog-tag changelog-tag--critical">Critical</span></div>
