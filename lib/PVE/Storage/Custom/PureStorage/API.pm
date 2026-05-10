@@ -1023,15 +1023,11 @@ sub volume_overwrite {
             names     => $name,
             overwrite => 'true',
         });
-        warn "PureStorage API rollback overwrite: POST " . $uri->as_string .
-            " source=$source api_version=" . $self->get_api_version() . "\n";
         return $self->post($uri->as_string, {
             source => { name => $source },
         });
     } else {
         # API 1.x
-        warn "PureStorage API rollback overwrite: POST volume/$name source=$source api_version=" .
-            $self->get_api_version() . "\n";
         return $self->post("volume/$name", { overwrite => $source });
     }
 }

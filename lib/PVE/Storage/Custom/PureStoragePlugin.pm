@@ -2621,9 +2621,6 @@ sub volume_snapshot_rollback {
     my $snap_suffix = encode_snapshot_name($snap);
     my $full_snap_name = "${pure_volname}.${snap_suffix}";
 
-    warn "PureStorage rollback requested: store=$storeid vol=$volname target=$pure_volname " .
-        "snap=$snap source=$full_snap_name\n";
-
     # Validate: Check if target volume exists
     my $vol = eval { $api->volume_get($pure_volname); };
     unless ($vol) {
@@ -2654,7 +2651,6 @@ sub volume_snapshot_rollback {
     if ($@) {
         die "Failed to rollback volume '$volname' to snapshot '$snap': $@";
     }
-    warn "PureStorage rollback overwrite completed: target=$pure_volname source=$full_snap_name\n";
 
     # Same per-device rescan + multipath map resize as volume_resize: the
     # snapshot may have a different capacity than the current volume, and
