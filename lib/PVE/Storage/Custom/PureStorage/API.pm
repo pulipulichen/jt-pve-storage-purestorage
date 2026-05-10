@@ -1018,12 +1018,20 @@ sub volume_overwrite {
     if ($self->is_api_v2()) {
         # API 2.x: POST /volumes copies the source into the named target.
         # `overwrite=true` is a query parameter, not a PATCH/body field.
-        my $encoded_name = uri_escape($name);
-        return $self->post("volumes?names=$encoded_name&overwrite=true", {
+        my $uri = URI->new('volumes');
+        $uri->query_form({
+            names     => $name,
+            overwrite => 'true',
+        });
+        warn "PureStorage API rollback overwrite: POST " . $uri->as_string .
+            " source=$source api_version=" . $self->get_api_version() . "\n";
+        return $self->post($uri->as_string, {
             source => { name => $source },
         });
     } else {
         # API 1.x
+        warn "PureStorage API rollback overwrite: POST volume/$name source=$source api_version=" .
+            $self->get_api_version() . "\n";
         return $self->post("volume/$name", { overwrite => $source });
     }
 }
