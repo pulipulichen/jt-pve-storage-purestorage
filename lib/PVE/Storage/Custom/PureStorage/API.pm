@@ -1018,12 +1018,8 @@ sub volume_overwrite {
     if ($self->is_api_v2()) {
         # API 2.x: POST /volumes copies the source into the named target.
         # `overwrite=true` is a query parameter, not a PATCH/body field.
-        my $uri = URI->new('volumes');
-        $uri->query_form({
-            names     => $name,
-            overwrite => 'true',
-        });
-        return $self->post($uri->as_string, {
+        my $encoded_name = uri_escape($name);
+        return $self->post("volumes?names=$encoded_name&overwrite=true", {
             source => { name => $source },
         });
     } else {
