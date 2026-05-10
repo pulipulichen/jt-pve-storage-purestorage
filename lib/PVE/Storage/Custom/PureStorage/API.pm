@@ -584,15 +584,13 @@ sub get_managed_capacity {
 
         my $used = 0;
         if (ref($space) eq 'HASH' && $space->{space}) {
-            # Pod quotas in Pure count against logical (provisioned) size,
-            # not post-reduction physical bytes. Prefer total_provisioned
-            # (the metric the quota actually enforces); fall back through
-            # virtual / total_used / total_physical for older Purity that
-            # may omit some of these.
-            $used = $space->{space}{total_provisioned}
-                 // $space->{space}{virtual}
-                 // $space->{space}{total_used}
+            # For pod status, Pure's "virtual" value matches the usage shown
+            # in the GUI; total_used/total_provisioned can reflect the quota
+            # accounting size and make PVE show the pod as 100% full.
+            $used = $space->{space}{virtual}
                  // $space->{space}{total_physical}
+                 // $space->{space}{total_used}
+                 // $space->{space}{total_provisioned}
                  // 0;
         }
 
@@ -1018,11 +1016,12 @@ sub volume_overwrite {
     croak "source is required" unless $source;
 
     if ($self->is_api_v2()) {
-        # API 2.x: PATCH /volumes with source and overwrite flag
-        return $self->patch("volumes", {
-            source    => { name => $source },
-            overwrite => JSON::true,
-        }, { names => $name });
+        # API 2.x: POST /volumes copies the source into the named target.
+        # `overwrite=true` is a query parameter, not a PATCH/body field.
+        my $encoded_name = uri_escape($name);
+        return $self->post("volumes?names=$encoded_name&overwrite=true", {
+            source => { name => $source },
+        });
     } else {
         # API 1.x
         return $self->post("volume/$name", { overwrite => $source });
