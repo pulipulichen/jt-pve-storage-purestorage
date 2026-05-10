@@ -1,0 +1,36 @@
+name: Build Debian Package
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-deb:
+    name: Build .deb
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential debhelper fakeroot
+
+      - name: Build Debian package
+        run: dpkg-buildpackage -us -uc -b
+
+      - name: Prepare artifact
+        run: |
+          mkdir -p artifacts
+          cp ../jt-pve-storage-purestorage_*_all.deb artifacts/jt-pve-storage-purestorage_latest_all.deb
+
+      - name: Upload Debian package
+        uses: actions/upload-artifact@v4
+        with:
+          name: jt-pve-storage-purestorage_latest_all
+          path: artifacts/jt-pve-storage-purestorage_latest_all.deb
+          if-no-files-found: error
