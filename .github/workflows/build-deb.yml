@@ -23,9 +23,14 @@ jobs:
       - name: Build Debian package
         run: dpkg-buildpackage -us -uc -b
 
+      - name: Collect Debian package
+        run: |
+          mkdir -p artifacts
+          cp ../jt-pve-storage-purestorage_*_all.deb artifacts/
+
       - name: Upload Debian package
         uses: actions/upload-artifact@v4
         with:
           name: jt-pve-storage-purestorage-deb
-          path: ../jt-pve-storage-purestorage_*_all.deb
+          path: artifacts/jt-pve-storage-purestorage_*_all.deb
           if-no-files-found: error
