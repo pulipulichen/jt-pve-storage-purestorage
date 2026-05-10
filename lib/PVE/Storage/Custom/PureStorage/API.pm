@@ -584,15 +584,12 @@ sub get_managed_capacity {
 
         my $used = 0;
         if (ref($space) eq 'HASH' && $space->{space}) {
-            # Pod quotas in Pure count against logical (provisioned) size,
-            # not post-reduction physical bytes. Prefer total_provisioned
-            # (the metric the quota actually enforces); fall back through
-            # virtual / total_used / total_physical for older Purity that
-            # may omit some of these.
-            $used = $space->{space}{total_provisioned}
-                 // $space->{space}{virtual}
-                 // $space->{space}{total_used}
+            # PVE's storage status "used" column should show consumed space,
+            # while "total" below still reflects the pod quota cap when set.
+            $used = $space->{space}{total_used}
                  // $space->{space}{total_physical}
+                 // $space->{space}{total_provisioned}
+                 // $space->{space}{virtual}
                  // 0;
         }
 
