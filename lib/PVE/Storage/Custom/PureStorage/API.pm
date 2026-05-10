@@ -1016,11 +1016,12 @@ sub volume_overwrite {
     croak "source is required" unless $source;
 
     if ($self->is_api_v2()) {
-        # API 2.x: PATCH /volumes with source and overwrite flag
-        return $self->patch("volumes", {
-            source    => { name => $source },
-            overwrite => JSON::true,
-        }, { names => $name });
+        # API 2.x: POST /volumes copies the source into the named target.
+        # `overwrite=true` is a query parameter, not a PATCH/body field.
+        my $encoded_name = uri_escape($name);
+        return $self->post("volumes?names=$encoded_name&overwrite=true", {
+            source => { name => $source },
+        });
     } else {
         # API 1.x
         return $self->post("volume/$name", { overwrite => $source });
